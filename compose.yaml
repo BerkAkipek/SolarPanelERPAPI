@@ -1,0 +1,65 @@
+name: solarpanelerp
+services:
+  db:
+    image: postgres:17.11
+    environment:
+      POSTGRES_DB: solar_erp
+      POSTGRES_USER: solar_erp
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U solar_erp -d solar_erp"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+    restart: unless-stopped
+
+  migrate:
+    build:
+      context: .
+      dockerfile: database/Dockerfile
+    environment: &database_environment
+      DB_HOST: db
+      DB_PORT: "5432"
+      DB_NAME: solar_erp
+      DB_USER: solar_erp
+      DB_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    depends_on:
+      db:
+        condition: service_healthy
+    command: ["alembic", "upgrade", "head"]
+
+  api:
+    build:
+      context: .
+      dockerfile: database/Dockerfile
+    environment: *database_environment
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    ports:
+      - "127.0.0.1:${API_PORT:-8000}:8000"
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  test:
+    profiles: ["test"]
+    build:
+      context: .
+      dockerfile: database/Dockerfile
+    environment: *database_environment
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    command: ["python", "-m", "pytest", "-q", "tests"]
+
+volumes:
+  postgres_data:

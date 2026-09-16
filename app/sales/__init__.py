@@ -1,0 +1,1 @@
+"""Sales order domain module."""

@@ -1,0 +1,28 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  test:
+    name: Build, Migrate & Test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure environment
+        run: |
+          cp .env.example .env
+
+      - name: Run test suite via Docker Compose
+        run: |
+          docker compose --profile test run --rm test
+
+      - name: Verify demo seed idempotency
+        run: |
+          docker compose run --rm api python scripts/seed_demo.py

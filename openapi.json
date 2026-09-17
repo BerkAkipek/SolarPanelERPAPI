@@ -1,0 +1,4535 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Solar Panel ERP API",
+    "description": "\n# Solar Panel ERP API (v1.0.0)\n\nA robust, enterprise-grade REST API for solar panel manufacturing and fulfillment operations.\n\n## Core V1 Business Capabilities\nVersion 1 answers the central operational questions of a solar module plant:\n1. **Given a customer sales order, can we fulfill it directly from warehouse stock?**\n2. **Do we need production to satisfy unfulfilled demand?**\n3. **If production is required, do we have the feasible raw materials in stock to manufacture the missing panels?**\n4. **Can we execute production orders atomically, reserving and consuming raw components and outputting finished modules?**\n\n---\n\n## Architectural Invariants & Domain Principles\n\n- **One Source of Truth**: Physical stock quantities are derived exclusively from immutable, append-only `inventory_movements` and `inventory_movement_lines`. No mutable counter columns exist.\n- **Stock Availability**: `Available = OnHand - ActiveReservations`. Reservable locations are strictly active locations of type `WAREHOUSE`, `BIN`, and `PRODUCTION`. Quarantine (`QUARANTINE`), damaged (`DAMAGED`), and transit (`TRANSIT`) locations are never promised to sales orders or production feasibility.\n- **Option A Traceability**: Component reservations belong directly to production order material lines (`production_order_material_id`), preserving end-to-end genealogy.\n- **Explicit Workflows**:\n  - Sales Orders: `DRAFT` \u2794 `CONFIRMED` \u2794 `CANCELLED`\n  - Stock Reservations: `ACTIVE` \u2794 `RELEASED` or `CONSUMED`\n  - Production Orders: `DRAFT` \u2794 `RELEASED` \u2794 `IN_PROGRESS` \u2794 `COMPLETED` (or `CANCELLED`)\n- **Atomic Execution**: Completing a production order executes four interrelated domain events in a single PostgreSQL transaction: consumes reservations, posts raw material consumption movements, posts finished goods output movements, and marks the order `COMPLETED`. Any failure triggers an automatic full rollback.\n",
+    "version": "1.0.0"
+  },
+  "paths": {
+    "/items": {
+      "post": {
+        "tags": [
+          "Product definition"
+        ],
+        "summary": "Create catalog item",
+        "description": "Creates a new catalog item (e.g.\n\nfinished solar panel model or component).\n- SKU must be unique per organization.\n- Type must be FINISHED_GOOD, COMPONENT, RAW_MATERIAL, or CONSUMABLE.",
+        "operationId": "create_item_items_post",
+        "parameters": [
+          {
+            "name": "x-organization-id",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "maximum": 9223372036854775807,
+              "exclusiveMinimum": 0,
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ItemCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ItemRead"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/items/{item_id}/revisions": {
+      "post": {
+        "tags": [
+          "Product definition"
+        ],
+        "summary": "Create item revision",
+        "description": "Creates a versioned, immutable revision for an item (e.g.\n\nREV-A).\n- Revision code must be unique for the item.\n- Revisions start in ACTIVE or DRAFT state.",
+        "operationId": "create_revision_items__item_id__revisions_post",
+        "parameters": [
+          {
+            "name": "item_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "maximum": 9223372036854775807,
+              "exclusiveMinimum": 0,
+              "title": "Item Id"
+            }
+          },
+          {
+            "name": "x-organization-id",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "maximum": 9223372036854775807,
+              "exclusiveMinimum": 0,
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RevisionCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RevisionRead"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "Product definition"
+        ],
+        "summary": "List item revisions",
+        "description": "Lists all revisions belonging to the specified item.",
+        "operationId": "list_revisions_items__item_id__revisions_get",
+        "parameters": [
+          {
+            "name": "item_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "maximum": 9223372036854775807,
+              "exclusiveMinimum": 0,
+              "title": "Item Id"
+            }
+          },
+          {
+            "name": "x-organization-id",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "maximum": 9223372036854775807,
+              "exclusiveMinimum": 0,
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/RevisionRead"
+                  },
+                  "title": "Response List Revisions Items  Item Id  Revisions Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/boms": {
+      "post": {
+        "tags": [
+          "Product definition"
+        ],
+        "summary": "Create Bill of Materials (recipe)",
+        "description": "Creates a new Bill of Materials recipe for a finished-good product revision.\n\n- Starts in DRAFT status.\n- Database trigger enforces that recipes start in DRAFT and cannot be activated without component lines.",
+        "operationId": "create_bom_boms_post",
+        "parameters": [
+          {
+            "name": "x-organization-id",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "maximum": 9223372036854775807,
+              "exclusiveMinimum": 0,
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BOMCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BOMRead"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/boms/{bom_id}/lines": {
+      "post": {
+        "tags": [
+          "Product definition"
+        ],
+        "summary": "Add component line to BOM",
+        "description": "Adds a required component revision and quantity per output unit to a DRAFT BOM.\n\n- Once a BOM is ACTIVE or OBSOLETE, lines are strictly immutable.\n- Component cannot self-reference the finished-good revision.",
+        "operationId": "add_bom_line_boms__bom_id__lines_post",
+        "parameters": [
+          {
+            "name": "bom_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "maximum": 9223372036854775807,
+              "exclusiveMinimum": 0,
+              "title": "Bom Id"
+            }
+          },
+          {
+            "name": "x-organization-id",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "maximum": 9223372036854775807,
+              "exclusiveMinimum": 0,
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BOMLineCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BOMLineRead"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/boms/{bom_id}/activate": {
+      "post": {
+        "tags": [
+          "Product definition"
+        ],
+        "summary": "Activate BOM recipe",
+        "description": "Transitions a DRAFT BOM to ACTIVE status.\n\n- BOM must have at least one component line.\n- Active BOMs become the recipe authority for BOM explosion and production feasibility.",
+        "operationId": "activate_bom_boms__bom_id__activate_post",
+        "parameters": [
+          {
+            "name": "bom_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "maximum": 9223372036854775807,
+              "exclusiveMinimum": 0,
+              "title": "Bom Id"
+            }
+          },
+          {
+            "name": "x-organization-id",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "maximum": 9223372036854775807,
+              "exclusiveMinimum": 0,
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BOMRead"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/items/{item_id}": {
+      "get": {
+        "tags": [
+          "Product definition"
+        ],
+        "summary": "Get item details",
+        "description": "Retrieves item catalog details by item ID.",
+        "operationId": "get_item_items__item_id__get",
+        "parameters": [
+          {
+            "name": "item_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "maximum": 9223372036854775807,
+              "exclusiveMinimum": 0,
+              "title": "Item Id"
+            }
+          },
+          {
+            "name": "x-organization-id",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "maximum": 9223372036854775807,
+              "exclusiveMinimum": 0,
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ItemRead"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/boms/{bom_id}": {
+      "get": {
+        "tags": [
+          "Product definition"
+        ],
+        "summary": "Get BOM recipe details",
+        "description": "Retrieves Bill of Materials recipe header and component lines by BOM ID.",
+        "operationId": "get_bom_boms__bom_id__get",
+        "parameters": [
+          {
+            "name": "bom_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "maximum": 9223372036854775807,
+              "exclusiveMinimum": 0,
+              "title": "Bom Id"
+            }
+          },
+          {
+            "name": "x-organization-id",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "maximum": 9223372036854775807,
+              "exclusiveMinimum": 0,
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BOMRead"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/inventory/movements": {
+      "post": {
+        "tags": [
+          "Inventory ledger"
+        ],
+        "summary": "Post double-entry inventory movement",
+        "description": "Posts an append-only double-entry physical inventory movement with one or more lines.\n\n- Movement types: RECEIPT, SHIPMENT, TRANSFER, ADJUSTMENT_IN, ADJUSTMENT_OUT, PRODUCTION_CONSUMPTION, PRODUCTION_OUTPUT.\n- Database triggers enforce that source location balances never drop below zero.\n- Safe retries via Idempotency-Key header.",
+        "operationId": "post_movement_inventory_movements_post",
+        "parameters": [
+          {
+            "name": "idempotency-key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 100,
+                  "pattern": "^\\S+$"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Idempotency-Key"
+            }
+          },
+          {
+            "name": "x-organization-id",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "maximum": 9223372036854775807,
+              "exclusiveMinimum": 0,
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MovementCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MovementRead"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/inventory/items/{revision_id}/on-hand": {
+      "get": {
+        "tags": [
+          "Inventory ledger"
+        ],
+        "summary": "Get physical on-hand stock",
+        "description": "Calculates real-time physical on-hand inventory across all locations for an item revision.\n\n- Formula: Incoming - Outgoing across append-only movement lines.\n- Includes warehouse stock, production bins, and quarantine/damaged stock.",
+        "operationId": "get_on_hand_inventory_items__revision_id__on_hand_get",
+        "parameters": [
+          {
+            "name": "revision_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "maximum": 9223372036854775807,
+              "exclusiveMinimum": 0,
+              "title": "Revision Id"
+            }
+          },
+          {
+            "name": "x-organization-id",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "maximum": 9223372036854775807,
+              "exclusiveMinimum": 0,
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OnHandRead"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/inventory/items/{revision_id}/availability": {
+      "get": {
+        "tags": [
+          "Inventory ledger"
+        ],
+        "summary": "Get available stock",
+        "description": "Calculates available-to-promise inventory accounting for active reservations.\n\n- Formula: On Hand - Active Reservations.\n- All three totals and the location breakdown cover the same eligible locations.\n- Reservable Locations Invariant: Only active locations of type WAREHOUSE, BIN, and PRODUCTION count.\n- Quarantine (QUARANTINE), damaged, and transit locations are strictly excluded.\n- Use /on-hand for physical stock across all locations, including excluded stock.",
+        "operationId": "get_availability_inventory_items__revision_id__availability_get",
+        "parameters": [
+          {
+            "name": "revision_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "maximum": 9223372036854775807,
+              "exclusiveMinimum": 0,
+              "title": "Revision Id"
+            }
+          },
+          {
+            "name": "x-organization-id",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "maximum": 9223372036854775807,
+              "exclusiveMinimum": 0,
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AvailabilityRead"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/inventory/reservations": {
+      "post": {
+        "tags": [
+          "Inventory ledger"
+        ],
+        "summary": "Create stock reservation",
+        "description": "Creates an active stock reservation against available inventory.\n\n- Option A Traceability: Must reference either a sales_order_line_id or production_order_material_id.\n- Rejects if quantity exceeds currently available stock at the location.",
+        "operationId": "post_reservation_inventory_reservations_post",
+        "parameters": [
+          {
+            "name": "x-organization-id",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "maximum": 9223372036854775807,
+              "exclusiveMinimum": 0,
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReservationCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReservationRead"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/inventory/reservations/{reservation_id}": {
+      "get": {
+        "tags": [
+          "Inventory ledger"
+        ],
+        "summary": "Get reservation details",
+        "description": "Retrieves reservation details, current status (ACTIVE, RELEASED, or CONSUMED), and ownership.",
+        "operationId": "get_reservation_inventory_reservations__reservation_id__get",
+        "parameters": [
+          {
+            "name": "reservation_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "maximum": 9223372036854775807,
+              "exclusiveMinimum": 0,
+              "title": "Reservation Id"
+            }
+          },
+          {
+            "name": "x-organization-id",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "maximum": 9223372036854775807,
+              "exclusiveMinimum": 0,
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReservationRead"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "Inventory ledger"
+        ],
+        "summary": "Release reservation",
+        "description": "Explicitly releases an active stock reservation (status -> RELEASED).\n\n- Restores available stock to the location.\n- Row is preserved in database for audit history; never physically deleted.",
+        "operationId": "delete_reservation_inventory_reservations__reservation_id__delete",
+        "parameters": [
+          {
+            "name": "reservation_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "maximum": 9223372036854775807,
+              "exclusiveMinimum": 0,
+              "title": "Reservation Id"
+            }
+          },
+          {
+            "name": "x-organization-id",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "maximum": 9223372036854775807,
+              "exclusiveMinimum": 0,
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReservationRead"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/inventory/reservations/{reservation_id}/release": {
+      "post": {
+        "tags": [
+          "Inventory ledger"
+        ],
+        "summary": "Release reservation",
+        "description": "Explicitly releases an active stock reservation (status -> RELEASED).\n\n- Restores available stock to the location.\n- Row is preserved in database for audit history; never physically deleted.",
+        "operationId": "delete_reservation_inventory_reservations__reservation_id__release_post",
+        "parameters": [
+          {
+            "name": "reservation_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "maximum": 9223372036854775807,
+              "exclusiveMinimum": 0,
+              "title": "Reservation Id"
+            }
+          },
+          {
+            "name": "x-organization-id",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "maximum": 9223372036854775807,
+              "exclusiveMinimum": 0,
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReservationRead"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/inventory/reservations/{reservation_id}/consume": {
+      "post": {
+        "tags": [
+          "Inventory ledger"
+        ],
+        "summary": "Consume reservation",
+        "description": "Atomically consumes an active reservation and posts its physical stock issue.\n\n- Sales allocations post SHIPMENT; material allocations post PRODUCTION_CONSUMPTION.\n- Retrying a consumed reservation returns its existing state without another issue.\n- Production order completion owns its own atomic material and output workflow.\n- Terminal state; consumed reservations cannot be released.",
+        "operationId": "consume_reservation_inventory_reservations__reservation_id__consume_post",
+        "parameters": [
+          {
+            "name": "reservation_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "maximum": 9223372036854775807,
+              "exclusiveMinimum": 0,
+              "title": "Reservation Id"
+            }
+          },
+          {
+            "name": "x-organization-id",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "maximum": 9223372036854775807,
+              "exclusiveMinimum": 0,
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReservationRead"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/sales-orders": {
+      "post": {
+        "tags": [
+          "Sales orders"
+        ],
+        "summary": "Create sales order",
+        "description": "Creates a new customer sales order in DRAFT status.\n\n- Order numbers must be unique per organization.\n- Customer partner must exist and be active.",
+        "operationId": "post_sales_order_sales_orders_post",
+        "parameters": [
+          {
+            "name": "x-organization-id",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "maximum": 9223372036854775807,
+              "exclusiveMinimum": 0,
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SalesOrderCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SalesOrderRead"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/sales-orders/{order_id}": {
+      "get": {
+        "tags": [
+          "Sales orders"
+        ],
+        "summary": "Get sales order details",
+        "description": "Retrieves sales order details, customer header, status, and lines.",
+        "operationId": "get_sales_order_sales_orders__order_id__get",
+        "parameters": [
+          {
+            "name": "order_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "maximum": 9223372036854775807,
+              "exclusiveMinimum": 0,
+              "title": "Order Id"
+            }
+          },
+          {
+            "name": "x-organization-id",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "maximum": 9223372036854775807,
+              "exclusiveMinimum": 0,
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SalesOrderRead"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/sales-orders/{order_id}/fulfillment-analysis": {
+      "get": {
+        "tags": [
+          "Sales orders"
+        ],
+        "summary": "Analyze order fulfillment",
+        "description": "Evaluates whether the order can be fulfilled from current stock or requires manufacturing.\n\n- Read-only: does not modify inventory, reserve stock, or create production orders.\n- Computes for each line: ordered_quantity, available_quantity, ship_from_stock, and production_required.\n- Returns overall flag: can_fulfill_entirely_from_stock.",
+        "operationId": "get_fulfillment_analysis_sales_orders__order_id__fulfillment_analysis_get",
+        "parameters": [
+          {
+            "name": "order_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "maximum": 9223372036854775807,
+              "exclusiveMinimum": 0,
+              "title": "Order Id"
+            }
+          },
+          {
+            "name": "x-organization-id",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "maximum": 9223372036854775807,
+              "exclusiveMinimum": 0,
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FulfillmentAnalysisRead"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/sales-orders/{order_id}/material-feasibility": {
+      "get": {
+        "tags": [
+          "Sales orders"
+        ],
+        "summary": "Analyze material feasibility for order",
+        "description": "Evaluates component raw material availability to manufacture panels required by this order.\n\n- Combines fulfillment analysis with BOM explosion.\n- Identifies exact required quantities, reservable component stock, and shortages.\n- Excludes quarantine and damaged stock from available components.\n- Returns can_produce and can_fulfill_all flags.",
+        "operationId": "get_material_feasibility_sales_orders__order_id__material_feasibility_get",
+        "parameters": [
+          {
+            "name": "order_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "maximum": 9223372036854775807,
+              "exclusiveMinimum": 0,
+              "title": "Order Id"
+            }
+          },
+          {
+            "name": "x-organization-id",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "maximum": 9223372036854775807,
+              "exclusiveMinimum": 0,
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SalesOrderFeasibilityRead"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/sales-orders/{order_id}/production-orders": {
+      "post": {
+        "tags": [
+          "Sales orders"
+        ],
+        "summary": "Create production order for sales order",
+        "description": "Creates a manufacturing order in DRAFT status tied directly to a sales order line.\n\n- Snapshots the active BOM recipe and material requirements.\n- Enables end-to-end traceability from customer order to manufactured module.",
+        "operationId": "post_sales_order_production_order_sales_orders__order_id__production_orders_post",
+        "parameters": [
+          {
+            "name": "order_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "maximum": 9223372036854775807,
+              "exclusiveMinimum": 0,
+              "title": "Order Id"
+            }
+          },
+          {
+            "name": "x-organization-id",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "maximum": 9223372036854775807,
+              "exclusiveMinimum": 0,
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProductionOrderCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProductionOrderRead"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/sales-orders/{order_id}/lines": {
+      "post": {
+        "tags": [
+          "Sales orders"
+        ],
+        "summary": "Add line to draft sales order",
+        "description": "Appends an order line with revision, quantity, and unit price to a DRAFT sales order.",
+        "operationId": "post_sales_order_line_sales_orders__order_id__lines_post",
+        "parameters": [
+          {
+            "name": "order_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "maximum": 9223372036854775807,
+              "exclusiveMinimum": 0,
+              "title": "Order Id"
+            }
+          },
+          {
+            "name": "x-organization-id",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "maximum": 9223372036854775807,
+              "exclusiveMinimum": 0,
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SalesOrderLineCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SalesOrderLineRead"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/sales-orders/{order_id}/confirm": {
+      "post": {
+        "tags": [
+          "Sales orders"
+        ],
+        "summary": "Confirm sales order",
+        "description": "Explicit business operation to confirm a DRAFT sales order (status -> CONFIRMED).\n\n- Enforces order invariants: order must not be empty, revisions must be ACTIVE, cancelled orders cannot be confirmed.\n- Idempotent: repeated confirmation of an already confirmed order succeeds safely.",
+        "operationId": "post_confirm_sales_order_sales_orders__order_id__confirm_post",
+        "parameters": [
+          {
+            "name": "order_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "maximum": 9223372036854775807,
+              "exclusiveMinimum": 0,
+              "title": "Order Id"
+            }
+          },
+          {
+            "name": "x-organization-id",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "maximum": 9223372036854775807,
+              "exclusiveMinimum": 0,
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SalesOrderRead"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/sales-orders/{order_id}/cancel": {
+      "post": {
+        "tags": [
+          "Sales orders"
+        ],
+        "summary": "Cancel sales order",
+        "description": "Cancels a sales order (status -> CANCELLED).\n\n- Prevents cancelling shipped orders.\n- Requires active stock reservations to be released before cancelling.",
+        "operationId": "post_cancel_sales_order_sales_orders__order_id__cancel_post",
+        "parameters": [
+          {
+            "name": "order_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "maximum": 9223372036854775807,
+              "exclusiveMinimum": 0,
+              "title": "Order Id"
+            }
+          },
+          {
+            "name": "x-organization-id",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "maximum": 9223372036854775807,
+              "exclusiveMinimum": 0,
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SalesOrderRead"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/production/boms/{bom_id}/explode": {
+      "get": {
+        "tags": [
+          "Production"
+        ],
+        "summary": "Explode BOM recipe",
+        "description": "Pure domain function that explodes a BOM recipe for a target production quantity.\n\n- Formula: round(production_quantity * component_quantity / bom_output_quantity, 6).\n- Read-only: zero database mutations.",
+        "operationId": "get_bom_explosion_production_boms__bom_id__explode_get",
+        "parameters": [
+          {
+            "name": "bom_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "maximum": 9223372036854775807,
+              "exclusiveMinimum": 0,
+              "title": "Bom Id"
+            }
+          },
+          {
+            "name": "quantity",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "number",
+                  "exclusiveMinimum": 0.0
+                },
+                {
+                  "type": "string",
+                  "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$"
+                }
+              ],
+              "description": "Target production quantity",
+              "title": "Quantity"
+            },
+            "description": "Target production quantity"
+          },
+          {
+            "name": "x-organization-id",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "maximum": 9223372036854775807,
+              "exclusiveMinimum": 0,
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BOMExplosionRead"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/production/boms/{bom_id}/feasibility": {
+      "get": {
+        "tags": [
+          "Production"
+        ],
+        "summary": "Analyze BOM material feasibility",
+        "description": "Evaluates whether sufficient raw components exist in reservable stock to manufacture the requested quantity.\n\n- Checks only active WAREHOUSE, BIN, and PRODUCTION locations.\n- Excludes quarantine, damaged, and transit inventory.\n- Reports exact shortage quantities per component and overall can_produce flag.",
+        "operationId": "get_bom_feasibility_production_boms__bom_id__feasibility_get",
+        "parameters": [
+          {
+            "name": "bom_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "maximum": 9223372036854775807,
+              "exclusiveMinimum": 0,
+              "title": "Bom Id"
+            }
+          },
+          {
+            "name": "quantity",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "number",
+                  "exclusiveMinimum": 0.0
+                },
+                {
+                  "type": "string",
+                  "pattern": "^(?!^[-+.]*$)[+-]?0*(?:\\d{0,12}|(?=[\\d.]{1,19}0*$)\\d{0,12}\\.\\d{0,6}0*$)"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Target production quantity",
+              "title": "Quantity"
+            },
+            "description": "Target production quantity"
+          },
+          {
+            "name": "production_required",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "number",
+                  "exclusiveMinimum": 0.0
+                },
+                {
+                  "type": "string",
+                  "pattern": "^(?!^[-+.]*$)[+-]?0*(?:\\d{0,12}|(?=[\\d.]{1,19}0*$)\\d{0,12}\\.\\d{0,6}0*$)"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Target production quantity (alias)",
+              "title": "Production Required"
+            },
+            "description": "Target production quantity (alias)"
+          },
+          {
+            "name": "x-organization-id",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "maximum": 9223372036854775807,
+              "exclusiveMinimum": 0,
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MaterialFeasibilityRead"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/production/orders": {
+      "post": {
+        "tags": [
+          "Production"
+        ],
+        "summary": "Create production order",
+        "description": "Creates a new production order in DRAFT status.\n\n- Freezes the active BOM version and calculates material requirements.\n- Does not reserve stock; keeps creation and commitment separate.",
+        "operationId": "post_production_order_production_orders_post",
+        "parameters": [
+          {
+            "name": "x-organization-id",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "maximum": 9223372036854775807,
+              "exclusiveMinimum": 0,
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProductionOrderCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProductionOrderRead"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/production/orders/{order_id}": {
+      "get": {
+        "tags": [
+          "Production"
+        ],
+        "summary": "Get production order details",
+        "description": "Retrieves production order details, status, and frozen material requirements.",
+        "operationId": "get_production_order_production_orders__order_id__get",
+        "parameters": [
+          {
+            "name": "order_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "maximum": 9223372036854775807,
+              "exclusiveMinimum": 0,
+              "title": "Order Id"
+            }
+          },
+          {
+            "name": "x-organization-id",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "maximum": 9223372036854775807,
+              "exclusiveMinimum": 0,
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProductionOrderRead"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/production/orders/{order_id}/release": {
+      "post": {
+        "tags": [
+          "Production"
+        ],
+        "summary": "Release production order and reserve materials",
+        "description": "Releases a DRAFT production order (status -> RELEASED) and reserves required component materials.\n\n- Option A Ownership: reservations reference production_order_material_id.\n- All-or-Nothing: fails with 409 Conflict (insufficient_stock) if any component is unavailable.",
+        "operationId": "post_release_production_order_production_orders__order_id__release_post",
+        "parameters": [
+          {
+            "name": "order_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "maximum": 9223372036854775807,
+              "exclusiveMinimum": 0,
+              "title": "Order Id"
+            }
+          },
+          {
+            "name": "x-organization-id",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "maximum": 9223372036854775807,
+              "exclusiveMinimum": 0,
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/ProductionOrderRelease"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Payload"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProductionOrderRead"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/production/orders/{order_id}/start": {
+      "post": {
+        "tags": [
+          "Production"
+        ],
+        "summary": "Start production order",
+        "description": "Transitions a RELEASED production order to IN_PROGRESS.\n\n- Idempotent; rejects unreleased or cancelled orders.",
+        "operationId": "post_start_production_order_production_orders__order_id__start_post",
+        "parameters": [
+          {
+            "name": "order_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "maximum": 9223372036854775807,
+              "exclusiveMinimum": 0,
+              "title": "Order Id"
+            }
+          },
+          {
+            "name": "x-organization-id",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "maximum": 9223372036854775807,
+              "exclusiveMinimum": 0,
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProductionOrderRead"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/production/orders/{order_id}/complete": {
+      "post": {
+        "tags": [
+          "Production"
+        ],
+        "summary": "Atomically complete production order",
+        "description": "Atomically completes production execution within a single database transaction:\n\n1. Consumes active material reservations (status -> CONSUMED).\n2. Posts raw material consumption movements (PRODUCTION_CONSUMPTION).\n3. Posts finished goods output movement (PRODUCTION_OUTPUT) into destination warehouse.\n4. Marks order COMPLETED.\n- All-or-nothing: if physical balances are insufficient, entire transaction rolls back cleanly.\n- Idempotent: repeated completion of an already completed order returns safely.",
+        "operationId": "post_complete_production_order_production_orders__order_id__complete_post",
+        "parameters": [
+          {
+            "name": "order_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "maximum": 9223372036854775807,
+              "exclusiveMinimum": 0,
+              "title": "Order Id"
+            }
+          },
+          {
+            "name": "x-organization-id",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "maximum": 9223372036854775807,
+              "exclusiveMinimum": 0,
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/ProductionOrderComplete"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Payload"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProductionOrderRead"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/production/orders/{order_id}/cancel": {
+      "post": {
+        "tags": [
+          "Production"
+        ],
+        "summary": "Cancel production order",
+        "description": "Cancels a production order (status -> CANCELLED) and releases active component reservations.",
+        "operationId": "post_cancel_production_order_production_orders__order_id__cancel_post",
+        "parameters": [
+          {
+            "name": "order_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "maximum": 9223372036854775807,
+              "exclusiveMinimum": 0,
+              "title": "Order Id"
+            }
+          },
+          {
+            "name": "x-organization-id",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "maximum": 9223372036854775807,
+              "exclusiveMinimum": 0,
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProductionOrderRead"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/production-orders": {
+      "post": {
+        "tags": [
+          "Production orders"
+        ],
+        "summary": "Create production order",
+        "description": "Creates a new production order in DRAFT status with frozen material requirements.",
+        "operationId": "post_direct_production_order_production_orders_post",
+        "parameters": [
+          {
+            "name": "x-organization-id",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "maximum": 9223372036854775807,
+              "exclusiveMinimum": 0,
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProductionOrderCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProductionOrderRead"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/production-orders/{order_id}": {
+      "get": {
+        "tags": [
+          "Production orders"
+        ],
+        "summary": "Get production order details",
+        "description": "Retrieves production order details, current status, and component requirements.",
+        "operationId": "get_direct_production_order_production_orders__order_id__get",
+        "parameters": [
+          {
+            "name": "order_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "maximum": 9223372036854775807,
+              "exclusiveMinimum": 0,
+              "title": "Order Id"
+            }
+          },
+          {
+            "name": "x-organization-id",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "maximum": 9223372036854775807,
+              "exclusiveMinimum": 0,
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProductionOrderRead"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/production-orders/{order_id}/release": {
+      "post": {
+        "tags": [
+          "Production orders"
+        ],
+        "summary": "Release production order and reserve materials",
+        "description": "Releases a DRAFT production order and reserves all required component materials.",
+        "operationId": "post_direct_release_production_order_production_orders__order_id__release_post",
+        "parameters": [
+          {
+            "name": "order_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "maximum": 9223372036854775807,
+              "exclusiveMinimum": 0,
+              "title": "Order Id"
+            }
+          },
+          {
+            "name": "x-organization-id",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "maximum": 9223372036854775807,
+              "exclusiveMinimum": 0,
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/ProductionOrderRelease"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Payload"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProductionOrderRead"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/production-orders/{order_id}/start": {
+      "post": {
+        "tags": [
+          "Production orders"
+        ],
+        "summary": "Start production order",
+        "description": "Transitions a RELEASED production order to IN_PROGRESS.",
+        "operationId": "post_direct_start_production_order_production_orders__order_id__start_post",
+        "parameters": [
+          {
+            "name": "order_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "maximum": 9223372036854775807,
+              "exclusiveMinimum": 0,
+              "title": "Order Id"
+            }
+          },
+          {
+            "name": "x-organization-id",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "maximum": 9223372036854775807,
+              "exclusiveMinimum": 0,
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProductionOrderRead"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/production-orders/{order_id}/complete": {
+      "post": {
+        "tags": [
+          "Production orders"
+        ],
+        "summary": "Atomically complete production order",
+        "description": "Atomically completes production execution within a single database transaction.",
+        "operationId": "post_direct_complete_production_order_production_orders__order_id__complete_post",
+        "parameters": [
+          {
+            "name": "order_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "maximum": 9223372036854775807,
+              "exclusiveMinimum": 0,
+              "title": "Order Id"
+            }
+          },
+          {
+            "name": "x-organization-id",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "maximum": 9223372036854775807,
+              "exclusiveMinimum": 0,
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/ProductionOrderComplete"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Payload"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProductionOrderRead"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/production-orders/{order_id}/cancel": {
+      "post": {
+        "tags": [
+          "Production orders"
+        ],
+        "summary": "Cancel production order",
+        "description": "Cancels a production order and releases active component reservations.",
+        "operationId": "post_direct_cancel_production_order_production_orders__order_id__cancel_post",
+        "parameters": [
+          {
+            "name": "order_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "maximum": 9223372036854775807,
+              "exclusiveMinimum": 0,
+              "title": "Order Id"
+            }
+          },
+          {
+            "name": "x-organization-id",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "maximum": 9223372036854775807,
+              "exclusiveMinimum": 0,
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProductionOrderRead"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/health": {
+      "get": {
+        "summary": "Health",
+        "operationId": "health_health_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "AvailabilityRead": {
+        "properties": {
+          "organization_id": {
+            "type": "integer",
+            "title": "Organization Id"
+          },
+          "item_revision_id": {
+            "type": "integer",
+            "title": "Item Revision Id"
+          },
+          "item_id": {
+            "type": "integer",
+            "title": "Item Id"
+          },
+          "sku": {
+            "type": "string",
+            "title": "Sku"
+          },
+          "revision_code": {
+            "type": "string",
+            "title": "Revision Code"
+          },
+          "base_uom": {
+            "type": "string",
+            "title": "Base Uom"
+          },
+          "on_hand": {
+            "type": "string",
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "On Hand"
+          },
+          "reserved": {
+            "type": "string",
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Reserved"
+          },
+          "available": {
+            "type": "string",
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Available"
+          },
+          "locations": {
+            "items": {
+              "$ref": "#/components/schemas/LocationAvailability"
+            },
+            "type": "array",
+            "title": "Locations"
+          }
+        },
+        "type": "object",
+        "required": [
+          "organization_id",
+          "item_revision_id",
+          "item_id",
+          "sku",
+          "revision_code",
+          "base_uom",
+          "on_hand",
+          "reserved",
+          "available",
+          "locations"
+        ],
+        "title": "AvailabilityRead"
+      },
+      "BOMCreate": {
+        "properties": {
+          "product_revision_id": {
+            "type": "integer",
+            "maximum": 9.223372036854776e+18,
+            "exclusiveMinimum": 0.0,
+            "title": "Product Revision Id"
+          },
+          "version": {
+            "type": "integer",
+            "maximum": 2147483647.0,
+            "exclusiveMinimum": 0.0,
+            "title": "Version",
+            "default": 1
+          },
+          "output_quantity": {
+            "anyOf": [
+              {
+                "type": "number",
+                "exclusiveMinimum": 0.0
+              },
+              {
+                "type": "string",
+                "pattern": "^(?!^[-+.]*$)[+-]?0*(?:\\d{0,12}|(?=[\\d.]{1,19}0*$)\\d{0,12}\\.\\d{0,6}0*$)"
+              }
+            ],
+            "title": "Output Quantity",
+            "default": "1"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "product_revision_id"
+        ],
+        "title": "BOMCreate"
+      },
+      "BOMExplosionRead": {
+        "properties": {
+          "bom_id": {
+            "type": "integer",
+            "title": "Bom Id"
+          },
+          "production_quantity": {
+            "type": "string",
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Production Quantity"
+          },
+          "requirements": {
+            "items": {
+              "$ref": "#/components/schemas/ExplodedRequirementRead"
+            },
+            "type": "array",
+            "title": "Requirements"
+          }
+        },
+        "type": "object",
+        "required": [
+          "bom_id",
+          "production_quantity",
+          "requirements"
+        ],
+        "title": "BOMExplosionRead"
+      },
+      "BOMLineCreate": {
+        "properties": {
+          "line_no": {
+            "type": "integer",
+            "maximum": 2147483647.0,
+            "exclusiveMinimum": 0.0,
+            "title": "Line No"
+          },
+          "component_revision_id": {
+            "type": "integer",
+            "maximum": 9.223372036854776e+18,
+            "exclusiveMinimum": 0.0,
+            "title": "Component Revision Id"
+          },
+          "quantity": {
+            "anyOf": [
+              {
+                "type": "number",
+                "exclusiveMinimum": 0.0
+              },
+              {
+                "type": "string",
+                "pattern": "^(?!^[-+.]*$)[+-]?0*(?:\\d{0,12}|(?=[\\d.]{1,19}0*$)\\d{0,12}\\.\\d{0,6}0*$)"
+              }
+            ],
+            "title": "Quantity"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "line_no",
+          "component_revision_id",
+          "quantity"
+        ],
+        "title": "BOMLineCreate"
+      },
+      "BOMLineRead": {
+        "properties": {
+          "id": {
+            "type": "integer",
+            "title": "Id"
+          },
+          "organization_id": {
+            "type": "integer",
+            "title": "Organization Id"
+          },
+          "bom_id": {
+            "type": "integer",
+            "title": "Bom Id"
+          },
+          "line_no": {
+            "type": "integer",
+            "title": "Line No"
+          },
+          "component_revision_id": {
+            "type": "integer",
+            "title": "Component Revision Id"
+          },
+          "quantity": {
+            "type": "string",
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Quantity"
+          },
+          "component": {
+            "$ref": "#/components/schemas/RevisionDescription"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "organization_id",
+          "bom_id",
+          "line_no",
+          "component_revision_id",
+          "quantity",
+          "component"
+        ],
+        "title": "BOMLineRead"
+      },
+      "BOMRead": {
+        "properties": {
+          "id": {
+            "type": "integer",
+            "title": "Id"
+          },
+          "organization_id": {
+            "type": "integer",
+            "title": "Organization Id"
+          },
+          "product_revision_id": {
+            "type": "integer",
+            "title": "Product Revision Id"
+          },
+          "version": {
+            "type": "integer",
+            "title": "Version"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "DRAFT",
+              "ACTIVE",
+              "OBSOLETE"
+            ],
+            "title": "Status"
+          },
+          "output_quantity": {
+            "type": "string",
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Output Quantity"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "product": {
+            "$ref": "#/components/schemas/RevisionDescription"
+          },
+          "lines": {
+            "items": {
+              "$ref": "#/components/schemas/BOMLineRead"
+            },
+            "type": "array",
+            "title": "Lines"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "organization_id",
+          "product_revision_id",
+          "version",
+          "status",
+          "output_quantity",
+          "created_at",
+          "product",
+          "lines"
+        ],
+        "title": "BOMRead"
+      },
+      "BOMSummary": {
+        "properties": {
+          "id": {
+            "type": "integer",
+            "title": "Id"
+          },
+          "organization_id": {
+            "type": "integer",
+            "title": "Organization Id"
+          },
+          "product_revision_id": {
+            "type": "integer",
+            "title": "Product Revision Id"
+          },
+          "version": {
+            "type": "integer",
+            "title": "Version"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "DRAFT",
+              "ACTIVE",
+              "OBSOLETE"
+            ],
+            "title": "Status"
+          },
+          "output_quantity": {
+            "type": "string",
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Output Quantity"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "organization_id",
+          "product_revision_id",
+          "version",
+          "status",
+          "output_quantity",
+          "created_at"
+        ],
+        "title": "BOMSummary"
+      },
+      "ExplodedRequirementRead": {
+        "properties": {
+          "bom_line_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bom Line Id"
+          },
+          "line_no": {
+            "type": "integer",
+            "title": "Line No"
+          },
+          "component_revision_id": {
+            "type": "integer",
+            "title": "Component Revision Id"
+          },
+          "quantity_per_unit": {
+            "type": "string",
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Quantity Per Unit"
+          },
+          "required_quantity": {
+            "type": "string",
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Required Quantity"
+          },
+          "sku": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sku"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "base_uom": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Base Uom"
+          }
+        },
+        "type": "object",
+        "required": [
+          "bom_line_id",
+          "line_no",
+          "component_revision_id",
+          "quantity_per_unit",
+          "required_quantity"
+        ],
+        "title": "ExplodedRequirementRead"
+      },
+      "FulfillmentAnalysisRead": {
+        "properties": {
+          "sales_order_id": {
+            "type": "integer",
+            "title": "Sales Order Id"
+          },
+          "order_number": {
+            "type": "string",
+            "title": "Order Number"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "DRAFT",
+              "CONFIRMED",
+              "RESERVED",
+              "PARTIALLY_SHIPPED",
+              "SHIPPED",
+              "CANCELLED"
+            ],
+            "title": "Status"
+          },
+          "can_fulfill_entirely_from_stock": {
+            "type": "boolean",
+            "title": "Can Fulfill Entirely From Stock"
+          },
+          "total_ordered": {
+            "type": "string",
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Total Ordered"
+          },
+          "total_from_stock": {
+            "type": "string",
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Total From Stock"
+          },
+          "total_production_required": {
+            "type": "string",
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Total Production Required"
+          },
+          "lines": {
+            "items": {
+              "$ref": "#/components/schemas/LineFulfillmentAnalysis"
+            },
+            "type": "array",
+            "title": "Lines"
+          }
+        },
+        "type": "object",
+        "required": [
+          "sales_order_id",
+          "order_number",
+          "status",
+          "can_fulfill_entirely_from_stock",
+          "total_ordered",
+          "total_from_stock",
+          "total_production_required",
+          "lines"
+        ],
+        "title": "FulfillmentAnalysisRead"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "type": "array",
+            "title": "Detail"
+          }
+        },
+        "type": "object",
+        "title": "HTTPValidationError"
+      },
+      "ItemCreate": {
+        "properties": {
+          "sku": {
+            "type": "string",
+            "maxLength": 100,
+            "minLength": 1,
+            "title": "Sku"
+          },
+          "name": {
+            "type": "string",
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Name"
+          },
+          "item_type": {
+            "type": "string",
+            "enum": [
+              "MATERIAL",
+              "COMPONENT",
+              "FINISHED_GOOD"
+            ],
+            "title": "Item Type"
+          },
+          "base_uom": {
+            "type": "string",
+            "maxLength": 20,
+            "minLength": 1,
+            "title": "Base Uom"
+          },
+          "tracking_type": {
+            "type": "string",
+            "enum": [
+              "NONE",
+              "LOT",
+              "SERIAL"
+            ],
+            "title": "Tracking Type",
+            "default": "NONE"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "sku",
+          "name",
+          "item_type",
+          "base_uom"
+        ],
+        "title": "ItemCreate"
+      },
+      "ItemRead": {
+        "properties": {
+          "id": {
+            "type": "integer",
+            "title": "Id"
+          },
+          "organization_id": {
+            "type": "integer",
+            "title": "Organization Id"
+          },
+          "sku": {
+            "type": "string",
+            "title": "Sku"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "item_type": {
+            "type": "string",
+            "enum": [
+              "MATERIAL",
+              "COMPONENT",
+              "FINISHED_GOOD"
+            ],
+            "title": "Item Type"
+          },
+          "base_uom": {
+            "type": "string",
+            "title": "Base Uom"
+          },
+          "tracking_type": {
+            "type": "string",
+            "title": "Tracking Type"
+          },
+          "is_active": {
+            "type": "boolean",
+            "title": "Is Active"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updated At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "organization_id",
+          "sku",
+          "name",
+          "item_type",
+          "base_uom",
+          "tracking_type",
+          "is_active",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "ItemRead"
+      },
+      "LineFulfillmentAnalysis": {
+        "properties": {
+          "line_id": {
+            "type": "integer",
+            "title": "Line Id"
+          },
+          "line_no": {
+            "type": "integer",
+            "title": "Line No"
+          },
+          "item_revision_id": {
+            "type": "integer",
+            "title": "Item Revision Id"
+          },
+          "sku": {
+            "type": "string",
+            "title": "Sku"
+          },
+          "revision_code": {
+            "type": "string",
+            "title": "Revision Code"
+          },
+          "ordered_quantity": {
+            "type": "string",
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Ordered Quantity"
+          },
+          "available_quantity": {
+            "type": "string",
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Available Quantity"
+          },
+          "ship_from_stock": {
+            "type": "string",
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Ship From Stock"
+          },
+          "production_required": {
+            "type": "string",
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Production Required"
+          },
+          "ordered": {
+            "type": "string",
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Ordered"
+          },
+          "available": {
+            "type": "string",
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Available"
+          }
+        },
+        "type": "object",
+        "required": [
+          "line_id",
+          "line_no",
+          "item_revision_id",
+          "sku",
+          "revision_code",
+          "ordered_quantity",
+          "available_quantity",
+          "ship_from_stock",
+          "production_required",
+          "ordered",
+          "available"
+        ],
+        "title": "LineFulfillmentAnalysis"
+      },
+      "LocationAvailability": {
+        "properties": {
+          "location_id": {
+            "type": "integer",
+            "title": "Location Id"
+          },
+          "code": {
+            "type": "string",
+            "title": "Code"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "on_hand": {
+            "type": "string",
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "On Hand"
+          },
+          "reserved": {
+            "type": "string",
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Reserved"
+          },
+          "available": {
+            "type": "string",
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Available"
+          }
+        },
+        "type": "object",
+        "required": [
+          "location_id",
+          "code",
+          "name",
+          "on_hand",
+          "reserved",
+          "available"
+        ],
+        "title": "LocationAvailability"
+      },
+      "LocationBalance": {
+        "properties": {
+          "location_id": {
+            "type": "integer",
+            "title": "Location Id"
+          },
+          "code": {
+            "type": "string",
+            "title": "Code"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "incoming_quantity": {
+            "type": "string",
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Incoming Quantity"
+          },
+          "outgoing_quantity": {
+            "type": "string",
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Outgoing Quantity"
+          },
+          "on_hand_quantity": {
+            "type": "string",
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "On Hand Quantity"
+          }
+        },
+        "type": "object",
+        "required": [
+          "location_id",
+          "code",
+          "name",
+          "incoming_quantity",
+          "outgoing_quantity",
+          "on_hand_quantity"
+        ],
+        "title": "LocationBalance"
+      },
+      "MaterialFeasibilityItem": {
+        "properties": {
+          "component_revision_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Component Revision Id"
+          },
+          "sku": {
+            "type": "string",
+            "title": "Sku"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "base_uom": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Base Uom"
+          },
+          "required": {
+            "type": "string",
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Required"
+          },
+          "available": {
+            "type": "string",
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Available"
+          },
+          "shortage": {
+            "type": "string",
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Shortage"
+          }
+        },
+        "type": "object",
+        "required": [
+          "sku",
+          "required",
+          "available",
+          "shortage"
+        ],
+        "title": "MaterialFeasibilityItem"
+      },
+      "MaterialFeasibilityRead": {
+        "properties": {
+          "bom_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bom Id"
+          },
+          "production_required": {
+            "type": "string",
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Production Required"
+          },
+          "can_produce": {
+            "type": "boolean",
+            "title": "Can Produce"
+          },
+          "materials": {
+            "items": {
+              "$ref": "#/components/schemas/MaterialFeasibilityItem"
+            },
+            "type": "array",
+            "title": "Materials"
+          }
+        },
+        "type": "object",
+        "required": [
+          "production_required",
+          "can_produce",
+          "materials"
+        ],
+        "title": "MaterialFeasibilityRead"
+      },
+      "MovementCreate": {
+        "properties": {
+          "movement_type": {
+            "type": "string",
+            "enum": [
+              "RECEIPT",
+              "TRANSFER",
+              "ADJUSTMENT_IN",
+              "ADJUSTMENT_OUT"
+            ],
+            "title": "Movement Type"
+          },
+          "reference": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 100
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reference"
+          },
+          "occurred_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Occurred At"
+          },
+          "lines": {
+            "items": {
+              "$ref": "#/components/schemas/MovementLineCreate"
+            },
+            "type": "array",
+            "minItems": 1,
+            "title": "Lines"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "movement_type",
+          "lines"
+        ],
+        "title": "MovementCreate"
+      },
+      "MovementLineCreate": {
+        "properties": {
+          "item_revision_id": {
+            "type": "integer",
+            "maximum": 9.223372036854776e+18,
+            "exclusiveMinimum": 0.0,
+            "title": "Item Revision Id"
+          },
+          "from_location_id": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 9.223372036854776e+18,
+                "exclusiveMinimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "From Location Id"
+          },
+          "to_location_id": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 9.223372036854776e+18,
+                "exclusiveMinimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "To Location Id"
+          },
+          "quantity": {
+            "anyOf": [
+              {
+                "type": "number",
+                "exclusiveMinimum": 0.0
+              },
+              {
+                "type": "string",
+                "pattern": "^(?!^[-+.]*$)[+-]?0*(?:\\d{0,12}|(?=[\\d.]{1,19}0*$)\\d{0,12}\\.\\d{0,6}0*$)"
+              }
+            ],
+            "title": "Quantity"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "item_revision_id",
+          "quantity"
+        ],
+        "title": "MovementLineCreate"
+      },
+      "MovementLineRead": {
+        "properties": {
+          "id": {
+            "type": "integer",
+            "title": "Id"
+          },
+          "organization_id": {
+            "type": "integer",
+            "title": "Organization Id"
+          },
+          "movement_id": {
+            "type": "integer",
+            "title": "Movement Id"
+          },
+          "item_revision_id": {
+            "type": "integer",
+            "title": "Item Revision Id"
+          },
+          "from_location_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "From Location Id"
+          },
+          "to_location_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "To Location Id"
+          },
+          "quantity": {
+            "type": "string",
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Quantity"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "organization_id",
+          "movement_id",
+          "item_revision_id",
+          "from_location_id",
+          "to_location_id",
+          "quantity"
+        ],
+        "title": "MovementLineRead"
+      },
+      "MovementRead": {
+        "properties": {
+          "id": {
+            "type": "integer",
+            "title": "Id"
+          },
+          "organization_id": {
+            "type": "integer",
+            "title": "Organization Id"
+          },
+          "movement_type": {
+            "type": "string",
+            "enum": [
+              "RECEIPT",
+              "TRANSFER",
+              "ADJUSTMENT_IN",
+              "ADJUSTMENT_OUT"
+            ],
+            "title": "Movement Type"
+          },
+          "reference": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reference"
+          },
+          "occurred_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Occurred At"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "lines": {
+            "items": {
+              "$ref": "#/components/schemas/MovementLineRead"
+            },
+            "type": "array",
+            "title": "Lines"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "organization_id",
+          "movement_type",
+          "reference",
+          "occurred_at",
+          "created_at",
+          "lines"
+        ],
+        "title": "MovementRead"
+      },
+      "OnHandRead": {
+        "properties": {
+          "organization_id": {
+            "type": "integer",
+            "title": "Organization Id"
+          },
+          "item_revision_id": {
+            "type": "integer",
+            "title": "Item Revision Id"
+          },
+          "item_id": {
+            "type": "integer",
+            "title": "Item Id"
+          },
+          "sku": {
+            "type": "string",
+            "title": "Sku"
+          },
+          "revision_code": {
+            "type": "string",
+            "title": "Revision Code"
+          },
+          "base_uom": {
+            "type": "string",
+            "title": "Base Uom"
+          },
+          "incoming_quantity": {
+            "type": "string",
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Incoming Quantity"
+          },
+          "outgoing_quantity": {
+            "type": "string",
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Outgoing Quantity"
+          },
+          "on_hand_quantity": {
+            "type": "string",
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "On Hand Quantity"
+          },
+          "locations": {
+            "items": {
+              "$ref": "#/components/schemas/LocationBalance"
+            },
+            "type": "array",
+            "title": "Locations"
+          }
+        },
+        "type": "object",
+        "required": [
+          "organization_id",
+          "item_revision_id",
+          "item_id",
+          "sku",
+          "revision_code",
+          "base_uom",
+          "incoming_quantity",
+          "outgoing_quantity",
+          "on_hand_quantity",
+          "locations"
+        ],
+        "title": "OnHandRead"
+      },
+      "ProductionOrderComplete": {
+        "properties": {
+          "to_location_id": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 9.223372036854776e+18,
+                "exclusiveMinimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "To Location Id",
+            "description": "Location to receive produced finished goods. If omitted, uses default active warehouse."
+          },
+          "occurred_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Occurred At"
+          },
+          "idempotency_key": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 100
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Idempotency Key"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "ProductionOrderComplete"
+      },
+      "ProductionOrderCreate": {
+        "properties": {
+          "production_order_number": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 50,
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Production Order Number"
+          },
+          "source_sales_order_line_id": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 9.223372036854776e+18,
+                "exclusiveMinimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Sales Order Line Id"
+          },
+          "product_revision_id": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 9.223372036854776e+18,
+                "exclusiveMinimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Product Revision Id"
+          },
+          "bom_id": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 9.223372036854776e+18,
+                "exclusiveMinimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bom Id"
+          },
+          "quantity": {
+            "anyOf": [
+              {
+                "type": "number",
+                "exclusiveMinimum": 0.0
+              },
+              {
+                "type": "string",
+                "pattern": "^(?!^[-+.]*$)[+-]?0*(?:\\d{0,12}|(?=[\\d.]{1,19}0*$)\\d{0,12}\\.\\d{0,6}0*$)"
+              }
+            ],
+            "title": "Quantity"
+          },
+          "planned_start_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Planned Start At"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "quantity"
+        ],
+        "title": "ProductionOrderCreate"
+      },
+      "ProductionOrderMaterialRead": {
+        "properties": {
+          "id": {
+            "type": "integer",
+            "title": "Id"
+          },
+          "bom_id": {
+            "type": "integer",
+            "title": "Bom Id"
+          },
+          "bom_line_id": {
+            "type": "integer",
+            "title": "Bom Line Id"
+          },
+          "component_revision_id": {
+            "type": "integer",
+            "title": "Component Revision Id"
+          },
+          "sku": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sku"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "base_uom": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Base Uom"
+          },
+          "required_quantity": {
+            "type": "string",
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Required Quantity"
+          },
+          "reserved_quantity": {
+            "type": "string",
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Reserved Quantity",
+            "default": "0"
+          },
+          "consumed_quantity": {
+            "type": "string",
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Consumed Quantity",
+            "default": "0"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "bom_id",
+          "bom_line_id",
+          "component_revision_id",
+          "required_quantity"
+        ],
+        "title": "ProductionOrderMaterialRead"
+      },
+      "ProductionOrderRead": {
+        "properties": {
+          "id": {
+            "type": "integer",
+            "title": "Id"
+          },
+          "organization_id": {
+            "type": "integer",
+            "title": "Organization Id"
+          },
+          "production_order_number": {
+            "type": "string",
+            "title": "Production Order Number"
+          },
+          "product_revision_id": {
+            "type": "integer",
+            "title": "Product Revision Id"
+          },
+          "sku": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sku"
+          },
+          "revision_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Revision Code"
+          },
+          "bom_id": {
+            "type": "integer",
+            "title": "Bom Id"
+          },
+          "bom_version": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bom Version"
+          },
+          "source_sales_order_line_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Sales Order Line Id"
+          },
+          "quantity": {
+            "type": "string",
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Quantity"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "planned_start_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Planned Start At"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "materials": {
+            "items": {
+              "$ref": "#/components/schemas/ProductionOrderMaterialRead"
+            },
+            "type": "array",
+            "title": "Materials",
+            "default": []
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "organization_id",
+          "production_order_number",
+          "product_revision_id",
+          "bom_id",
+          "quantity",
+          "status",
+          "created_at"
+        ],
+        "title": "ProductionOrderRead"
+      },
+      "ProductionOrderRelease": {
+        "properties": {
+          "location_id": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 9.223372036854776e+18,
+                "exclusiveMinimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Location Id",
+            "description": "Optional preferred stock location to reserve components from."
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "ProductionOrderRelease"
+      },
+      "ReservationCreate": {
+        "properties": {
+          "item_revision_id": {
+            "type": "integer",
+            "maximum": 9.223372036854776e+18,
+            "exclusiveMinimum": 0.0,
+            "title": "Item Revision Id"
+          },
+          "location_id": {
+            "type": "integer",
+            "maximum": 9.223372036854776e+18,
+            "exclusiveMinimum": 0.0,
+            "title": "Location Id"
+          },
+          "quantity": {
+            "anyOf": [
+              {
+                "type": "number",
+                "exclusiveMinimum": 0.0
+              },
+              {
+                "type": "string",
+                "pattern": "^(?!^[-+.]*$)[+-]?0*(?:\\d{0,12}|(?=[\\d.]{1,19}0*$)\\d{0,12}\\.\\d{0,6}0*$)"
+              }
+            ],
+            "title": "Quantity"
+          },
+          "sales_order_line_id": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 9.223372036854776e+18,
+                "exclusiveMinimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sales Order Line Id"
+          },
+          "production_order_material_id": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 9.223372036854776e+18,
+                "exclusiveMinimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Production Order Material Id"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "item_revision_id",
+          "location_id",
+          "quantity"
+        ],
+        "title": "ReservationCreate"
+      },
+      "ReservationRead": {
+        "properties": {
+          "id": {
+            "type": "integer",
+            "title": "Id"
+          },
+          "organization_id": {
+            "type": "integer",
+            "title": "Organization Id"
+          },
+          "item_revision_id": {
+            "type": "integer",
+            "title": "Item Revision Id"
+          },
+          "location_id": {
+            "type": "integer",
+            "title": "Location Id"
+          },
+          "sales_order_line_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sales Order Line Id"
+          },
+          "production_order_material_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Production Order Material Id"
+          },
+          "quantity": {
+            "type": "string",
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Quantity"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "ACTIVE",
+              "CONSUMED",
+              "RELEASED"
+            ],
+            "title": "Status"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updated At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "organization_id",
+          "item_revision_id",
+          "location_id",
+          "sales_order_line_id",
+          "production_order_material_id",
+          "quantity",
+          "status",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "ReservationRead"
+      },
+      "RevisionCreate": {
+        "properties": {
+          "revision_code": {
+            "type": "string",
+            "maxLength": 50,
+            "minLength": 1,
+            "title": "Revision Code"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "DRAFT",
+              "ACTIVE",
+              "OBSOLETE"
+            ],
+            "title": "Status",
+            "default": "DRAFT"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "revision_code"
+        ],
+        "title": "RevisionCreate"
+      },
+      "RevisionDescription": {
+        "properties": {
+          "item_id": {
+            "type": "integer",
+            "title": "Item Id"
+          },
+          "sku": {
+            "type": "string",
+            "title": "Sku"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "base_uom": {
+            "type": "string",
+            "title": "Base Uom"
+          },
+          "revision_id": {
+            "type": "integer",
+            "title": "Revision Id"
+          },
+          "revision_code": {
+            "type": "string",
+            "title": "Revision Code"
+          }
+        },
+        "type": "object",
+        "required": [
+          "item_id",
+          "sku",
+          "name",
+          "base_uom",
+          "revision_id",
+          "revision_code"
+        ],
+        "title": "RevisionDescription"
+      },
+      "RevisionRead": {
+        "properties": {
+          "id": {
+            "type": "integer",
+            "title": "Id"
+          },
+          "organization_id": {
+            "type": "integer",
+            "title": "Organization Id"
+          },
+          "item_id": {
+            "type": "integer",
+            "title": "Item Id"
+          },
+          "revision_code": {
+            "type": "string",
+            "title": "Revision Code"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "DRAFT",
+              "ACTIVE",
+              "OBSOLETE"
+            ],
+            "title": "Status"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "boms": {
+            "items": {
+              "$ref": "#/components/schemas/BOMSummary"
+            },
+            "type": "array",
+            "title": "Boms"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "organization_id",
+          "item_id",
+          "revision_code",
+          "status",
+          "created_at"
+        ],
+        "title": "RevisionRead"
+      },
+      "SalesOrderCreate": {
+        "properties": {
+          "order_number": {
+            "type": "string",
+            "maxLength": 50,
+            "minLength": 1,
+            "title": "Order Number"
+          },
+          "customer_id": {
+            "type": "integer",
+            "maximum": 9.223372036854776e+18,
+            "exclusiveMinimum": 0.0,
+            "title": "Customer Id"
+          },
+          "currency_code": {
+            "type": "string",
+            "pattern": "^[A-Z]{3}$",
+            "title": "Currency Code"
+          },
+          "ordered_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ordered At"
+          },
+          "required_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Required At"
+          },
+          "lines": {
+            "items": {
+              "$ref": "#/components/schemas/SalesOrderLineCreate"
+            },
+            "type": "array",
+            "title": "Lines"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "order_number",
+          "customer_id",
+          "currency_code"
+        ],
+        "title": "SalesOrderCreate"
+      },
+      "SalesOrderFeasibilityRead": {
+        "properties": {
+          "sales_order_id": {
+            "type": "integer",
+            "title": "Sales Order Id"
+          },
+          "order_number": {
+            "type": "string",
+            "title": "Order Number"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "DRAFT",
+              "CONFIRMED",
+              "RESERVED",
+              "PARTIALLY_SHIPPED",
+              "SHIPPED",
+              "CANCELLED"
+            ],
+            "title": "Status"
+          },
+          "can_fulfill_all": {
+            "type": "boolean",
+            "title": "Can Fulfill All"
+          },
+          "can_produce": {
+            "type": "boolean",
+            "title": "Can Produce"
+          },
+          "lines": {
+            "items": {
+              "$ref": "#/components/schemas/SalesOrderLineFeasibilityRead"
+            },
+            "type": "array",
+            "title": "Lines"
+          }
+        },
+        "type": "object",
+        "required": [
+          "sales_order_id",
+          "order_number",
+          "status",
+          "can_fulfill_all",
+          "can_produce",
+          "lines"
+        ],
+        "title": "SalesOrderFeasibilityRead"
+      },
+      "SalesOrderLineCreate": {
+        "properties": {
+          "line_no": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 2147483647.0,
+                "exclusiveMinimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Line No"
+          },
+          "item_revision_id": {
+            "type": "integer",
+            "maximum": 9.223372036854776e+18,
+            "exclusiveMinimum": 0.0,
+            "title": "Item Revision Id"
+          },
+          "quantity": {
+            "anyOf": [
+              {
+                "type": "number",
+                "exclusiveMinimum": 0.0
+              },
+              {
+                "type": "string",
+                "pattern": "^(?!^[-+.]*$)[+-]?0*(?:\\d{0,12}|(?=[\\d.]{1,19}0*$)\\d{0,12}\\.\\d{0,6}0*$)"
+              }
+            ],
+            "title": "Quantity"
+          },
+          "unit_price": {
+            "anyOf": [
+              {
+                "type": "number",
+                "minimum": 0.0
+              },
+              {
+                "type": "string",
+                "pattern": "^(?!^[-+.]*$)[+-]?0*(?:\\d{0,14}|(?=[\\d.]{1,19}0*$)\\d{0,14}\\.\\d{0,4}0*$)"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Unit Price"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "item_revision_id",
+          "quantity"
+        ],
+        "title": "SalesOrderLineCreate"
+      },
+      "SalesOrderLineFeasibilityRead": {
+        "properties": {
+          "line_id": {
+            "type": "integer",
+            "title": "Line Id"
+          },
+          "line_no": {
+            "type": "integer",
+            "title": "Line No"
+          },
+          "item_revision_id": {
+            "type": "integer",
+            "title": "Item Revision Id"
+          },
+          "sku": {
+            "type": "string",
+            "title": "Sku"
+          },
+          "revision_code": {
+            "type": "string",
+            "title": "Revision Code"
+          },
+          "ordered_quantity": {
+            "type": "string",
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Ordered Quantity"
+          },
+          "ship_from_stock": {
+            "type": "string",
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Ship From Stock"
+          },
+          "production_required": {
+            "type": "string",
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Production Required"
+          },
+          "bom_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bom Id"
+          },
+          "can_produce": {
+            "type": "boolean",
+            "title": "Can Produce"
+          },
+          "status_message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status Message"
+          },
+          "materials": {
+            "items": {
+              "$ref": "#/components/schemas/MaterialFeasibilityItem"
+            },
+            "type": "array",
+            "title": "Materials",
+            "default": []
+          }
+        },
+        "type": "object",
+        "required": [
+          "line_id",
+          "line_no",
+          "item_revision_id",
+          "sku",
+          "revision_code",
+          "ordered_quantity",
+          "ship_from_stock",
+          "production_required",
+          "can_produce"
+        ],
+        "title": "SalesOrderLineFeasibilityRead"
+      },
+      "SalesOrderLineRead": {
+        "properties": {
+          "id": {
+            "type": "integer",
+            "title": "Id"
+          },
+          "organization_id": {
+            "type": "integer",
+            "title": "Organization Id"
+          },
+          "sales_order_id": {
+            "type": "integer",
+            "title": "Sales Order Id"
+          },
+          "line_no": {
+            "type": "integer",
+            "title": "Line No"
+          },
+          "item_revision_id": {
+            "type": "integer",
+            "title": "Item Revision Id"
+          },
+          "sku": {
+            "type": "string",
+            "title": "Sku"
+          },
+          "revision_code": {
+            "type": "string",
+            "title": "Revision Code"
+          },
+          "quantity": {
+            "type": "string",
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Quantity"
+          },
+          "unit_price": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Unit Price"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "organization_id",
+          "sales_order_id",
+          "line_no",
+          "item_revision_id",
+          "sku",
+          "revision_code",
+          "quantity",
+          "unit_price"
+        ],
+        "title": "SalesOrderLineRead"
+      },
+      "SalesOrderRead": {
+        "properties": {
+          "id": {
+            "type": "integer",
+            "title": "Id"
+          },
+          "organization_id": {
+            "type": "integer",
+            "title": "Organization Id"
+          },
+          "order_number": {
+            "type": "string",
+            "title": "Order Number"
+          },
+          "customer_id": {
+            "type": "integer",
+            "title": "Customer Id"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "DRAFT",
+              "CONFIRMED",
+              "RESERVED",
+              "PARTIALLY_SHIPPED",
+              "SHIPPED",
+              "CANCELLED"
+            ],
+            "title": "Status"
+          },
+          "currency_code": {
+            "type": "string",
+            "title": "Currency Code"
+          },
+          "ordered_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Ordered At"
+          },
+          "required_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Required At"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "lines": {
+            "items": {
+              "$ref": "#/components/schemas/SalesOrderLineRead"
+            },
+            "type": "array",
+            "title": "Lines"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "organization_id",
+          "order_number",
+          "customer_id",
+          "status",
+          "currency_code",
+          "ordered_at",
+          "required_at",
+          "created_at",
+          "lines"
+        ],
+        "title": "SalesOrderRead"
+      },
+      "ValidationError": {
+        "properties": {
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "type": "array",
+            "title": "Location"
+          },
+          "msg": {
+            "type": "string",
+            "title": "Message"
+          },
+          "type": {
+            "type": "string",
+            "title": "Error Type"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "ctx": {
+            "type": "object",
+            "title": "Context"
+          }
+        },
+        "type": "object",
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError"
+      }
+    }
+  },
+  "tags": [
+    {
+      "name": "Product definition",
+      "description": "Product master data: finished solar panels, raw components, immutable revisions, and active BOM recipes."
+    },
+    {
+      "name": "Inventory ledger",
+      "description": "Double-entry physical stock movements, real-time on-hand balances, stock availability, and stock reservations."
+    },
+    {
+      "name": "Sales orders",
+      "description": "Customer order entry, explicit confirmation lifecycle, read-only fulfillment analysis, and order-level material feasibility."
+    },
+    {
+      "name": "Production",
+      "description": "Pure BOM explosion arithmetic and material feasibility calculations against current reservable inventory."
+    },
+    {
+      "name": "Production orders",
+      "description": "Manufacturing order creation, release (with material reservation), in-progress tracking, and atomic execution."
+    }
+  ]
+}

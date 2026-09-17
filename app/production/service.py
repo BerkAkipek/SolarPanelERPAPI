@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from decimal import Decimal
+from decimal import Decimal, DecimalException
 import logging
 
 from sqlalchemy import func, select
@@ -60,13 +60,17 @@ def explode_bom_recipe(
 
 
 def check_material_feasibility(
-    session: Session, organization_id: int, bom_id: int, production_quantity: Decimal
+    session: Session, organization_id: int, bom_id: int, production_quantity: Decimal,
+    *, available_quantities: dict[int, Decimal] | None = None,
 ) -> MaterialFeasibilityRead:
     """Read-only evaluation of material feasibility against physical reservable stock."""
     bom = read_bom(session, organization_id, bom_id)
     requirements = explode_bom(bom, production_quantity)
     comp_rev_ids = [r.component_revision_id for r in requirements if r.component_revision_id is not None]
-    availabilities = get_reservable_availability(session, organization_id, comp_rev_ids)
+    availabilities = (
+        get_reservable_availability(session, organization_id, comp_rev_ids)
+        if available_quantities is None else available_quantities
+    )
     feasibility = evaluate_material_feasibility(requirements, availabilities, production_quantity)
     return MaterialFeasibilityRead(
         bom_id=bom_id,
@@ -147,6 +151,10 @@ def create_production_order(
     if rev_and_item is None:
         raise DomainError(404, "revision_not_found", f"Item revision {product_revision_id} was not found.")
     rev, item = rev_and_item
+    if not item.is_active:
+        raise DomainError(422, "item_inactive", f"Item '{item.sku}' is inactive.")
+    if item.item_type != "FINISHED_GOOD":
+        raise DomainError(422, "finished_good_required", "Production requires a finished-good product revision.")
     if rev.status != "ACTIVE":
         raise DomainError(422, "inactive_revision", f"Item revision {product_revision_id} is not ACTIVE.")
 
@@ -228,7 +236,14 @@ def create_production_order(
         raise DomainError(422, "empty_bom", "BOM has no component lines.")
 
     # Pure domain BOM explosion
-    exploded = explode_bom(bom_lines, payload.quantity, output_quantity=bom.output_quantity)
+    try:
+        exploded = explode_bom(bom_lines, payload.quantity, output_quantity=bom.output_quantity)
+    except DecimalException as error:
+        raise DomainError(422, "material_quantity_out_of_range", "Calculated material requirements exceed supported decimal precision.") from error
+    for requirement in exploded:
+        if not Decimal(0) < requirement.required_quantity <= Decimal("999999999999.999999"):
+            raise DomainError(422, "material_quantity_out_of_range",
+                              f"Component revision {requirement.component_revision_id} requires a quantity outside positive NUMERIC(18,6) bounds.")
 
     # Within one transaction: snapshot production order header + material lines
     order = ProductionOrder(
@@ -244,13 +259,13 @@ def create_production_order(
     session.add(order)
     session.flush()
 
-    for line, req in zip(bom_lines, exploded):
+    for req in exploded:
         mat = ProductionOrderMaterial(
             organization_id=organization_id,
             production_order_id=order.id,
             bom_id=bom.id,
-            bom_line_id=line.id,
-            component_revision_id=line.component_revision_id,
+            bom_line_id=req.bom_line_id,
+            component_revision_id=req.component_revision_id,
             required_quantity=req.required_quantity,
         )
         session.add(mat)
@@ -489,6 +504,11 @@ def create_sales_order_production_order(
     session: Session, organization_id: int, order_id: int, payload: ProductionOrderCreate
 ) -> ProductionOrderRead:
     """Helper to create a production order scoped to a sales order."""
+    order = session.scalar(select(SalesOrder).where(
+        SalesOrder.organization_id == organization_id, SalesOrder.id == order_id,
+    ))
+    if order is None:
+        raise DomainError(404, "order_not_found", f"Sales order {order_id} was not found.")
     if payload.source_sales_order_line_id is not None:
         line = session.scalar(
             select(SalesOrderLine).where(
@@ -716,5 +736,3 @@ def complete_production_order(
     )
 
     return read_production_order(session, organization_id, order.id)
-
-

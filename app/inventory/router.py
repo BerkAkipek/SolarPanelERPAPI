@@ -46,8 +46,10 @@ def get_availability(revision_id: PathID, session: DatabaseSession, organization
     """Calculates available-to-promise inventory accounting for active reservations.
 
     - Formula: On Hand - Active Reservations.
+    - All three totals and the location breakdown cover the same eligible locations.
     - Reservable Locations Invariant: Only active locations of type WAREHOUSE, BIN, and PRODUCTION count.
     - Quarantine (QUARANTINE), damaged, and transit locations are strictly excluded.
+    - Use /on-hand for physical stock across all locations, including excluded stock.
     """
     return service.availability(session, organization_id, revision_id)
 
@@ -69,6 +71,7 @@ def get_reservation(reservation_id: PathID, session: DatabaseSession, organizati
 
 
 @router.delete("/reservations/{reservation_id}", response_model=ReservationRead, summary="Release reservation")
+@router.post("/reservations/{reservation_id}/release", response_model=ReservationRead, summary="Release reservation")
 def delete_reservation(reservation_id: PathID, session: DatabaseSession, organization_id: OrganizationID):
     """Explicitly releases an active stock reservation (status -> RELEASED).
 
@@ -80,10 +83,11 @@ def delete_reservation(reservation_id: PathID, session: DatabaseSession, organiz
 
 @router.post("/reservations/{reservation_id}/consume", response_model=ReservationRead, summary="Consume reservation")
 def consume_reservation(reservation_id: PathID, session: DatabaseSession, organization_id: OrganizationID):
-    """Transitions an active reservation to CONSUMED status.
+    """Atomically consumes an active reservation and posts its physical stock issue.
 
-    - Used by production execution when component stock is drawn into assembly.
+    - Sales allocations post SHIPMENT; material allocations post PRODUCTION_CONSUMPTION.
+    - Retrying a consumed reservation returns its existing state without another issue.
+    - Production order completion owns its own atomic material and output workflow.
     - Terminal state; consumed reservations cannot be released.
     """
     return service.consume_reservation(session, organization_id, reservation_id)
-

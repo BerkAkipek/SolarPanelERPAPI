@@ -32,6 +32,7 @@ from app.inventory.schemas import (
     ReservationRead,
 )
 from app.products.models import Item, ItemRevision
+from app.sales.models import SalesOrder, SalesOrderLine
 
 
 def request_hash(payload: MovementCreate) -> str:
@@ -146,6 +147,7 @@ def on_hand(session: Session, organization_id: int, revision_id: int) -> OnHandR
 
 
 def availability(session: Session, organization_id: int, revision_id: int) -> AvailabilityRead:
+    """Return balances for active, reservable locations from one ledger snapshot."""
     revision_and_item = session.execute(select(ItemRevision, Item)
         .join(Item, ItemRevision.item_id == Item.id)
         .where(ItemRevision.organization_id == organization_id, ItemRevision.id == revision_id)).first()
@@ -156,7 +158,9 @@ def availability(session: Session, organization_id: int, revision_id: int) -> Av
     rows = session.execute(select(InventoryAvailability, InventoryLocation)
         .join(InventoryLocation, InventoryAvailability.location_id == InventoryLocation.id)
         .where(InventoryAvailability.organization_id == organization_id,
-               InventoryAvailability.item_revision_id == revision_id)
+               InventoryAvailability.item_revision_id == revision_id,
+               InventoryLocation.is_active.is_(True),
+               InventoryLocation.location_type.in_(["WAREHOUSE", "BIN", "PRODUCTION"]))
         .order_by(InventoryLocation.id)).all()
     locations = [
         LocationAvailability(
@@ -214,6 +218,17 @@ def get_reservable_availability(
 def create_reservation(session: Session, organization_id: int, payload: ReservationCreate) -> ReservationRead:
     # All stock writes serialize per organization.
     session.execute(select(func.pg_advisory_xact_lock(organization_id)))
+
+    if payload.sales_order_line_id is not None:
+        order_status = session.scalar(
+            select(SalesOrder.status)
+            .join(SalesOrderLine, SalesOrderLine.sales_order_id == SalesOrder.id)
+            .where(SalesOrder.organization_id == organization_id,
+                   SalesOrderLine.organization_id == organization_id,
+                   SalesOrderLine.id == payload.sales_order_line_id)
+        )
+        if order_status == "CANCELLED":
+            raise DomainError(409, "order_cancelled", "Cannot reserve stock for a cancelled sales order.")
 
     revision = session.scalar(select(ItemRevision.id).where(
         ItemRevision.organization_id == organization_id,
@@ -281,6 +296,7 @@ def release_reservation(session: Session, organization_id: int, reservation_id: 
 
 
 def consume_reservation(session: Session, organization_id: int, reservation_id: int) -> ReservationRead:
+    """Consume the allocation and its physical stock in the request transaction."""
     session.execute(select(func.pg_advisory_xact_lock(organization_id)))
 
     reservation = session.scalar(select(StockReservation).where(
@@ -298,6 +314,21 @@ def consume_reservation(session: Session, organization_id: int, reservation_id: 
 
     reservation.status = "CONSUMED"
     session.flush()
+    movement = InventoryMovement(
+        organization_id=organization_id,
+        movement_type="SHIPMENT" if reservation.sales_order_line_id is not None else "PRODUCTION_CONSUMPTION",
+        reference=f"RESERVATION-{reservation.id}",
+    )
+    session.add(movement)
+    session.flush()
+    session.add(InventoryMovementLine(
+        organization_id=organization_id,
+        movement_id=movement.id,
+        item_revision_id=reservation.item_revision_id,
+        from_location_id=reservation.location_id,
+        quantity=reservation.quantity,
+    ))
+    session.flush()
     logger.info("Consumed reservation %s (item_revision=%s, qty=%s)", reservation.id, reservation.item_revision_id, reservation.quantity)
     return ReservationRead.model_validate(reservation)
 
@@ -310,4 +341,3 @@ def get_reservation(session: Session, organization_id: int, reservation_id: int)
     if reservation is None:
         raise DomainError(404, "reservation_not_found", f"Reservation {reservation_id} was not found.")
     return ReservationRead.model_validate(reservation)
-

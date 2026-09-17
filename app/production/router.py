@@ -46,8 +46,8 @@ def get_bom_feasibility(
     bom_id: PathID,
     session: DatabaseSession,
     organization_id: OrganizationID,
-    quantity: Annotated[Decimal | None, Query(gt=0, description="Target production quantity")] = None,
-    production_required: Annotated[Decimal | None, Query(gt=0, description="Target production quantity (alias)")] = None,
+    quantity: Annotated[Decimal | None, Query(gt=0, max_digits=18, decimal_places=6, allow_inf_nan=False, description="Target production quantity")] = None,
+    production_required: Annotated[Decimal | None, Query(gt=0, max_digits=18, decimal_places=6, allow_inf_nan=False, description="Target production quantity (alias)")] = None,
 ):
     """Evaluates whether sufficient raw components exist in reservable stock to manufacture the requested quantity.
 
@@ -55,6 +55,8 @@ def get_bom_feasibility(
     - Excludes quarantine, damaged, and transit inventory.
     - Reports exact shortage quantities per component and overall can_produce flag.
     """
+    if quantity is not None and production_required is not None and quantity != production_required:
+        raise DomainError(422, "conflicting_quantity", "quantity and production_required must agree when both are supplied.")
     target_quantity = quantity if quantity is not None else production_required
     if target_quantity is None:
         raise DomainError(422, "missing_quantity", "Either 'quantity' or 'production_required' query parameter must be provided.")
@@ -211,4 +213,3 @@ def post_direct_complete_production_order(
 def post_direct_cancel_production_order(order_id: PathID, session: DatabaseSession, organization_id: OrganizationID):
     """Cancels a production order and releases active component reservations."""
     return _cancel_order(order_id, session, organization_id)
-

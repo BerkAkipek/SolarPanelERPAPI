@@ -1,7 +1,7 @@
 from datetime import datetime
 from decimal import Decimal
 
-from pydantic import Field
+from pydantic import AwareDatetime, Field
 
 from app.schemas import Quantity, RecordID, RequestModel, ResponseModel
 
@@ -41,12 +41,12 @@ class MaterialFeasibilityRead(ResponseModel):
 
 
 class ProductionOrderCreate(RequestModel):
-    production_order_number: str | None = Field(default=None, max_length=50)
+    production_order_number: str | None = Field(default=None, min_length=1, max_length=50)
     source_sales_order_line_id: RecordID | None = None
     product_revision_id: RecordID | None = None
     bom_id: RecordID | None = None
     quantity: Quantity
-    planned_start_at: datetime | None = None
+    planned_start_at: AwareDatetime | None = None
 
 
 class ProductionOrderRelease(RequestModel):
@@ -94,5 +94,4 @@ class ProductionOrderRead(ResponseModel):
     planned_start_at: datetime | None = None
     created_at: datetime
     materials: list[ProductionOrderMaterialRead] = []
-
 

@@ -9,9 +9,10 @@ from sqlalchemy.orm import Session
 logger = logging.getLogger(__name__)
 
 from app.errors import DomainError
-from app.inventory.models import InventoryAvailability, InventoryLocation, StockReservation
+from app.inventory.models import StockReservation
+from app.inventory.service import get_reservable_availability
 from app.production.service import check_material_feasibility
-from app.products.models import BOM, Item, ItemRevision
+from app.products.models import BOM, BOMLine, Item, ItemRevision
 from app.sales.models import BusinessPartner, SalesOrder, SalesOrderLine
 from app.sales.schemas import (
     FulfillmentAnalysisRead,
@@ -82,8 +83,16 @@ def create_sales_order(session: Session, organization_id: int, payload: SalesOrd
     session.add(order)
     session.flush()
 
-    for idx, line in enumerate(payload.lines, start=1):
-        line_no = line.line_no if line.line_no is not None else idx
+    # Preserve explicit numbers; omitted numbers use the next free positive number.
+    used_numbers = {line.line_no for line in payload.lines if line.line_no is not None}
+    next_line = 1
+    for line in payload.lines:
+        line_no = line.line_no
+        if line_no is None:
+            while next_line in used_numbers:
+                next_line += 1
+            line_no = next_line
+            used_numbers.add(line_no)
         so_line = SalesOrderLine(
             organization_id=organization_id,
             sales_order_id=order.id,
@@ -172,6 +181,8 @@ def add_sales_order_line(
                 SalesOrderLine.sales_order_id == order_id,
             )
         ) or 0
+        if max_line == 2147483647:
+            raise DomainError(409, "line_number_exhausted", "Automatic line numbering is exhausted; specify an unused line_no.")
         line_no = max_line + 1
 
     so_line = SalesOrderLine(
@@ -244,6 +255,8 @@ def confirm_sales_order(session: Session, organization_id: int, order_id: int) -
 
 
 def cancel_sales_order(session: Session, organization_id: int, order_id: int) -> SalesOrderRead:
+    # Match reservation creation's lock order: organization stock lock, then order.
+    session.execute(select(func.pg_advisory_xact_lock(organization_id)))
     order = session.scalar(
         select(SalesOrder)
         .where(SalesOrder.organization_id == organization_id, SalesOrder.id == order_id)
@@ -257,6 +270,8 @@ def cancel_sales_order(session: Session, organization_id: int, order_id: int) ->
 
     if order.status in ("SHIPPED", "PARTIALLY_SHIPPED"):
         raise DomainError(409, "order_shipped", f"Cannot cancel a {order.status.lower()} sales order.")
+    if order.status not in ("DRAFT", "CONFIRMED"):
+        raise DomainError(409, "order_invalid_status", f"Cannot cancel sales order with status '{order.status}'.")
 
     has_reservations = session.scalar(
         select(func.count(StockReservation.id))
@@ -268,7 +283,7 @@ def cancel_sales_order(session: Session, organization_id: int, order_id: int) ->
         )
     )
     if has_reservations:
-        raise DomainError(409, "order_has_reservations", "Release active reservations before cancelling the sales order.")
+        raise DomainError(409, "order_has_reservations", "Orders with active or consumed reservations cannot be cancelled. Active reservations may be released; consumed reservations are terminal.")
 
     order.status = "CANCELLED"
     session.flush()
@@ -300,22 +315,11 @@ def analyze_sales_order_fulfillment(
         .order_by(SalesOrderLine.line_no)
     ).all()
 
-    available_cache: dict[int, Decimal] = {}
-
-    def get_available_stock(rev_id: int) -> Decimal:
-        if rev_id not in available_cache:
-            stock_rows = session.scalars(
-                select(InventoryAvailability.available_quantity)
-                .join(InventoryLocation, InventoryAvailability.location_id == InventoryLocation.id)
-                .where(
-                    InventoryAvailability.organization_id == organization_id,
-                    InventoryAvailability.item_revision_id == rev_id,
-                    InventoryLocation.is_active == True,
-                    InventoryLocation.location_type.in_(["WAREHOUSE", "BIN", "PRODUCTION"]),
-                )
-            ).all()
-            available_cache[rev_id] = sum((max(Decimal(0), q) for q in stock_rows), Decimal(0))
-        return available_cache[rev_id]
+    # Inventory owns eligibility and reservation math. Read every revision's stock
+    # in one query, then allocate the resulting snapshot in sales-line order.
+    available_cache = get_reservable_availability(
+        session, organization_id, list({line.item_revision_id for line, _, _ in rows}),
+    )
 
     analysis_lines = []
     total_ordered = Decimal(0)
@@ -324,7 +328,7 @@ def analyze_sales_order_fulfillment(
 
     for line, rev, item in rows:
         ordered_qty = line.quantity
-        avail_stock = get_available_stock(line.item_revision_id)
+        avail_stock = available_cache.get(line.item_revision_id, Decimal(0))
 
         ship_from_stock = min(ordered_qty, avail_stock)
         production_required = max(Decimal(0), ordered_qty - ship_from_stock)
@@ -371,6 +375,25 @@ def analyze_sales_order_material_feasibility(
     """Read-only evaluation combining sales order fulfillment with BOM explosion and component stock."""
     fulfillment = analyze_sales_order_fulfillment(session, organization_id, order_id)
 
+    # Select the latest active recipe per demanded revision, then read one shared
+    # component stock snapshot for the whole order.
+    revisions = {line.item_revision_id for line in fulfillment.lines if line.production_required > 0}
+    recipes = session.scalars(select(BOM).where(
+        BOM.organization_id == organization_id,
+        BOM.product_revision_id.in_(revisions), BOM.status == "ACTIVE",
+    ).order_by(BOM.version.desc())).all()
+    by_revision = {}
+    for recipe in recipes:
+        by_revision.setdefault(recipe.product_revision_id, recipe)
+    component_ids = session.scalars(select(BOMLine.component_revision_id).where(
+        BOMLine.organization_id == organization_id,
+        BOMLine.bom_id.in_([recipe.id for recipe in by_revision.values()]),
+    ).distinct()).all()
+    remaining = get_reservable_availability(session, organization_id, component_ids)
+    for line in fulfillment.lines:
+        if line.item_revision_id in remaining:
+            remaining[line.item_revision_id] = max(Decimal(0), remaining[line.item_revision_id] - line.ship_from_stock)
+
     feasibility_lines: list[SalesOrderLineFeasibilityRead] = []
 
     for line in fulfillment.lines:
@@ -393,15 +416,7 @@ def analyze_sales_order_material_feasibility(
             )
             continue
 
-        active_bom = session.scalar(
-            select(BOM)
-            .where(
-                BOM.organization_id == organization_id,
-                BOM.product_revision_id == line.item_revision_id,
-                BOM.status == "ACTIVE",
-            )
-            .order_by(BOM.version.desc())
-        )
+        active_bom = by_revision.get(line.item_revision_id)
 
         if active_bom is None:
             feasibility_lines.append(
@@ -423,8 +438,11 @@ def analyze_sales_order_material_feasibility(
             continue
 
         bom_feasibility = check_material_feasibility(
-            session, organization_id, active_bom.id, line.production_required
+            session, organization_id, active_bom.id, line.production_required,
+            available_quantities=remaining,
         )
+        for material in bom_feasibility.materials:
+            remaining[material.component_revision_id] = max(Decimal(0), material.available - material.required)
 
         feasibility_lines.append(
             SalesOrderLineFeasibilityRead(
@@ -452,7 +470,6 @@ def analyze_sales_order_material_feasibility(
         order_number=fulfillment.order_number,
         status=fulfillment.status,
         can_fulfill_all=can_fulfill_all,
+        can_produce=can_fulfill_all,
         lines=feasibility_lines,
     )
-
-

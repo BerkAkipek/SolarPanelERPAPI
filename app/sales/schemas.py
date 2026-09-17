@@ -6,7 +6,7 @@ from typing import Literal
 from pydantic import AwareDatetime, Field
 
 from app.production.schemas import MaterialFeasibilityItem
-from app.schemas import Quantity, RecordID, RequestModel, ResponseModel
+from app.schemas import Quantity, RecordID, RequestModel, ResponseModel, SequenceNumber
 
 OrderStatus = Literal[
     "DRAFT", "CONFIRMED", "RESERVED", "PARTIALLY_SHIPPED", "SHIPPED", "CANCELLED"
@@ -14,10 +14,10 @@ OrderStatus = Literal[
 
 
 class SalesOrderLineCreate(RequestModel):
-    line_no: int | None = Field(default=None, gt=0)
+    line_no: SequenceNumber | None = None
     item_revision_id: RecordID
     quantity: Quantity
-    unit_price: Decimal | None = Field(default=None, ge=0, decimal_places=4, allow_inf_nan=False)
+    unit_price: Decimal | None = Field(default=None, ge=0, max_digits=18, decimal_places=4, allow_inf_nan=False)
 
 
 class SalesOrderCreate(RequestModel):
@@ -99,6 +99,5 @@ class SalesOrderFeasibilityRead(ResponseModel):
     order_number: str
     status: OrderStatus
     can_fulfill_all: bool
+    can_produce: bool
     lines: list[SalesOrderLineFeasibilityRead]
-
-

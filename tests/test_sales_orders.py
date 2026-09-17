@@ -1,12 +1,14 @@
 """Integration tests for Step 4: Sales order demand and confirmation."""
 import os
+from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal
+from threading import Barrier
 from uuid import uuid4
 
 from fastapi.testclient import TestClient
 from psycopg import sql
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session
 
 from app.db import get_session
@@ -66,9 +68,11 @@ def client(sales_engine):
             yield session
 
     app.dependency_overrides[get_session] = test_session
-    with TestClient(app, headers={"X-Organization-ID": "1"}) as test_client:
-        yield test_client
-    app.dependency_overrides.pop(get_session, None)
+    try:
+        with TestClient(app, headers={"X-Organization-ID": "1"}) as test_client:
+            yield test_client
+    finally:
+        app.dependency_overrides.pop(get_session, None)
 
 
 def create_order(client, order_number="SO-101", customer_id=1, lines=None, currency="EUR"):
@@ -223,3 +227,253 @@ def test_inactive_customer_rejected(client):
     resp = create_order(client, "SO-INACT-CUST", customer_id=2)
     assert resp.status_code == 422
     assert resp.json()["detail"]["code"] == "customer_inactive"
+
+
+def test_create_get_and_append_persist_exact_values(client, sales_engine):
+    response = client.post("/sales-orders", json={
+        "order_number": "SO-PERSIST", "customer_id": 1, "currency_code": "EUR",
+        "ordered_at": "2026-09-17T15:00:00+03:00",
+        "required_at": "2026-09-20T15:00:00+03:00",
+        "lines": [
+            {"line_no": 2, "item_revision_id": 1, "quantity": "1.123456", "unit_price": "250.1234"},
+            {"item_revision_id": 4, "quantity": "2", "unit_price": "0"},
+            {"item_revision_id": 1, "quantity": "3"},
+        ],
+    })
+    assert response.status_code == 201, response.text
+    order = response.json()
+    assert [line["line_no"] for line in order["lines"]] == [1, 2, 3]
+    assert order["status"] == "DRAFT"
+    assert order["ordered_at"] == "2026-09-17T12:00:00Z"
+    assert order["required_at"] == "2026-09-20T12:00:00Z"
+    added = client.post(f"/sales-orders/{order['id']}/lines", json={
+        "item_revision_id": 4, "quantity": "0.000001", "unit_price": "99999999999999.9999",
+    })
+    assert added.status_code == 201, added.text
+    assert added.json()["line_no"] == 4
+    fetched = client.get(f"/sales-orders/{order['id']}")
+    assert fetched.status_code == 200
+    assert len(fetched.json()["lines"]) == 4
+    with sales_engine.connect() as connection:
+        header = connection.execute(text("""
+            SELECT organization_id, customer_id, order_number, currency_code, status
+            FROM sales_orders WHERE id=:id
+        """), {"id": order["id"]}).one()
+        assert tuple(header) == (1, 1, "SO-PERSIST", "EUR", "DRAFT")
+        rows = connection.execute(text("""
+            SELECT line_no, item_revision_id, quantity, unit_price FROM sales_order_lines
+            WHERE sales_order_id=:id ORDER BY line_no
+        """), {"id": order["id"]}).all()
+    assert rows == [
+        (1, 4, Decimal("2"), Decimal("0")),
+        (2, 1, Decimal("1.123456"), Decimal("250.1234")),
+        (3, 1, Decimal("3"), None),
+        (4, 4, Decimal("0.000001"), Decimal("99999999999999.9999")),
+    ]
+    for actual, stored in zip(fetched.json()["lines"], rows):
+        assert actual["sales_order_id"] == order["id"]
+        assert actual["organization_id"] == 1
+        assert Decimal(actual["quantity"]) == stored.quantity
+        assert (Decimal(actual["unit_price"]) if actual["unit_price"] is not None else None) == stored.unit_price
+
+
+def test_duplicate_lines_roll_back_whole_order_and_allow_corrected_retry(client, sales_engine):
+    lines = [{"line_no": 1, "item_revision_id": 1, "quantity": "10"}] * 2
+    response = create_order(client, "SO-ROLLBACK", lines=lines)
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "duplicate_line_no"
+    with sales_engine.connect() as connection:
+        assert connection.scalar(text("SELECT count(*) FROM sales_orders WHERE order_number='SO-ROLLBACK'")) == 0
+        assert connection.scalar(text("""
+            SELECT count(*) FROM sales_order_lines l LEFT JOIN sales_orders o ON o.id=l.sales_order_id
+            WHERE o.id IS NULL
+        """)) == 0
+    assert create_order(client, "SO-ROLLBACK", lines=lines[:1]).status_code == 201
+
+
+@pytest.mark.parametrize("field,value", [
+    ("line_no", 0), ("line_no", -1), ("line_no", True), ("line_no", "1"),
+    ("line_no", 2147483648), ("unit_price", "100000000000000"),
+    ("unit_price", "0.00001"), ("unit_price", "-1"), ("unit_price", "NaN"),
+    ("quantity", "0"), ("quantity", "0.0000001"), ("quantity", "Infinity"),
+])
+def test_invalid_line_values_rejected_on_create_and_append(client, field, value):
+    number = "SO-VALIDATION-" + uuid4().hex
+    line = {"item_revision_id": 1, "quantity": "1", field: value}
+    assert create_order(client, number, lines=[line]).status_code == 422
+    order = create_order(client, number, lines=[]).json()
+    assert client.post(f"/sales-orders/{order['id']}/lines", json=line).status_code == 422
+    assert client.get(f"/sales-orders/{order['id']}").json()["lines"] == []
+
+
+def test_append_duplicate_and_number_exhaustion_preserve_existing_lines(client):
+    order = create_order(client, "SO-MAX-LINE", lines=[
+        {"line_no": 2147483647, "item_revision_id": 1, "quantity": "1"},
+    ]).json()
+    path = f"/sales-orders/{order['id']}"
+    response = client.post(path + "/lines", json={"item_revision_id": 1, "quantity": "1"})
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "line_number_exhausted"
+    response = client.post(path + "/lines", json={
+        "line_no": 2147483647, "item_revision_id": 1, "quantity": "1",
+    })
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "duplicate_line_no"
+    assert len(client.get(path).json()["lines"]) == 1
+    assert client.post(path + "/lines", json={
+        "line_no": 1, "item_revision_id": 1, "quantity": "1",
+    }).status_code == 201
+
+
+def test_sales_order_reads_and_appends_are_tenant_scoped(client):
+    order = create_order(client, "SO-SCOPE").json()
+    for order_id, headers in [(order["id"], {"X-Organization-ID": "2"}), (999999, {})]:
+        path = f"/sales-orders/{order_id}"
+        responses = [client.get(path, headers=headers), client.post(path + "/lines", headers=headers,
+            json={"item_revision_id": 5, "quantity": "1"})]
+        for response in responses:
+            assert response.status_code == 404
+            assert response.json()["detail"]["code"] == "order_not_found"
+    for customer_id in [3, 999999]:
+        response = create_order(client, "SO-BAD-CUSTOMER", customer_id=customer_id)
+        assert response.status_code == 404
+        assert response.json()["detail"]["code"] == "customer_not_found"
+    assert len(client.get(f"/sales-orders/{order['id']}").json()["lines"]) == 1
+    client.headers.pop("X-Organization-ID")
+    assert client.get(f"/sales-orders/{order['id']}").status_code == 422
+    assert create_order(client, "SO-NO-TENANT").status_code == 422
+
+
+def test_concurrent_line_appends_persist_distinct_numbers(client):
+    order = create_order(client, "SO-CONCURRENT-LINES", lines=[]).json()
+    path = f"/sales-orders/{order['id']}"
+    def append_line(_):
+        return client.post(path + "/lines", json={"item_revision_id": 1, "quantity": "1"})
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        responses = list(pool.map(append_line, range(4)))
+    assert all(response.status_code == 201 for response in responses), [r.text for r in responses]
+    lines = client.get(path).json()["lines"]
+    assert [line["line_no"] for line in lines] == [1, 2, 3, 4]
+    assert len({line["id"] for line in lines}) == 4
+
+
+@pytest.mark.parametrize("status", ["DRAFT", "CONFIRMED", "RESERVED", "PARTIALLY_SHIPPED", "SHIPPED", "CANCELLED"])
+@pytest.mark.parametrize("operation", ["confirm", "cancel"])
+def test_transition_matrix(client, sales_engine, status, operation):
+    order = create_order(client, "SO-MATRIX-" + uuid4().hex).json()
+    path = f"/sales-orders/{order['id']}"
+    with sales_engine.begin() as connection:
+        connection.execute(text("UPDATE sales_orders SET status=:status WHERE id=:id"),
+                           {"status": status, "id": order["id"]})
+    before = client.get(path).json()
+    allowed = status in ({"DRAFT", "CONFIRMED"} if operation == "confirm" else {"DRAFT", "CONFIRMED", "CANCELLED"})
+    response = client.post(path + "/" + operation)
+    assert response.status_code == (200 if allowed else 409), response.text
+    if allowed:
+        target = "CONFIRMED" if operation == "confirm" else "CANCELLED"
+        assert response.json()["status"] == target
+        assert response.json()["lines"] == before["lines"]
+        assert client.post(path + "/" + operation).json() == response.json()
+    else:
+        expected = "order_invalid_status"
+        if operation == "confirm" and status == "CANCELLED":
+            expected = "order_cancelled"
+        if operation == "cancel" and status in {"SHIPPED", "PARTIALLY_SHIPPED"}:
+            expected = "order_shipped"
+        assert response.json()["detail"]["code"] == expected
+        assert client.get(path).json() == before
+
+
+@pytest.mark.parametrize("operation", ["confirm", "cancel"])
+def test_transitions_require_tenant_and_existing_order(client, operation):
+    created = create_order(client, "SO-SCOPE-" + uuid4().hex)
+    assert created.status_code == 201, created.text
+    order = created.json()
+    for order_id, headers in [(order["id"], {"X-Organization-ID": "2"}), (999999, {})]:
+        response = client.post(f"/sales-orders/{order_id}/{operation}", headers=headers)
+        assert response.status_code == 404
+        assert response.json()["detail"]["code"] == "order_not_found"
+    assert client.get(f"/sales-orders/{order['id']}").json()["status"] == "DRAFT"
+    client.headers.pop("X-Organization-ID")
+    assert client.post(f"/sales-orders/{order['id']}/{operation}").status_code == 422
+
+
+def stock_for_order(client, sales_engine):
+    order = create_order(client, "SO-ALLOCATION-" + uuid4().hex).json()
+    with sales_engine.begin() as connection:
+        location_id = connection.scalar(text("""
+            INSERT INTO inventory_locations(organization_id,code,name,location_type)
+            VALUES (1,:code,'Transition test','WAREHOUSE') RETURNING id
+        """), {"code": uuid4().hex})
+    response = client.post("/inventory/movements", json={
+        "movement_type": "RECEIPT",
+        "lines": [{"item_revision_id": 1, "to_location_id": location_id, "quantity": "100"}],
+    })
+    assert response.status_code == 201
+    payload = {"item_revision_id": 1, "location_id": location_id, "quantity": "100",
+               "sales_order_line_id": order["lines"][0]["id"]}
+    return order, payload
+
+
+@pytest.mark.parametrize("reservation_status", ["ACTIVE", "RELEASED", "CONSUMED"])
+def test_cancellation_respects_reservation_history(client, sales_engine, reservation_status):
+    order, payload = stock_for_order(client, sales_engine)
+    path = f"/sales-orders/{order['id']}"
+    assert client.post(path + "/confirm").status_code == 200
+    response = client.post("/inventory/reservations", json=payload)
+    assert response.status_code == 201
+    reservation_id = response.json()["id"]
+    if reservation_status != "ACTIVE":
+        operation = "release" if reservation_status == "RELEASED" else "consume"
+        assert client.post(f"/inventory/reservations/{reservation_id}/{operation}").status_code == 200
+    response = client.post(path + "/cancel")
+    if reservation_status == "RELEASED":
+        assert response.status_code == 200
+        assert response.json()["status"] == "CANCELLED"
+        retry_allocation = client.post("/inventory/reservations", json=payload)
+        assert retry_allocation.status_code == 409
+        assert retry_allocation.json()["detail"]["code"] == "order_cancelled"
+    else:
+        assert response.status_code == 409
+        assert response.json()["detail"]["code"] == "order_has_reservations"
+        assert client.get(path).json()["status"] == "CONFIRMED"
+    assert client.get(f"/inventory/reservations/{reservation_id}").json()["status"] == reservation_status
+
+
+def test_concurrent_cancellation_and_reservation_cannot_both_succeed(client, sales_engine):
+    order, payload = stock_for_order(client, sales_engine)
+    barrier = Barrier(2)
+    def cancel():
+        barrier.wait(timeout=5)
+        return client.post(f"/sales-orders/{order['id']}/cancel")
+    def reserve():
+        barrier.wait(timeout=5)
+        return client.post("/inventory/reservations", json=payload)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        cancel_future = pool.submit(cancel)
+        reserve_future = pool.submit(reserve)
+        cancelled, reserved = cancel_future.result(timeout=10), reserve_future.result(timeout=10)
+    if cancelled.status_code == 200:
+        assert reserved.status_code == 409
+        assert reserved.json()["detail"]["code"] == "order_cancelled"
+    else:
+        assert cancelled.status_code == 409
+        assert cancelled.json()["detail"]["code"] == "order_has_reservations"
+        assert reserved.status_code == 201
+
+
+@pytest.mark.parametrize("change,code", [("revision", "invalid_revision_status"), ("item", "item_inactive")])
+def test_confirmation_revalidates_catalog_and_preserves_draft(client, sales_engine, change, code):
+    order = create_order(client, "SO-REVALIDATE-" + uuid4().hex).json()
+    statement = "UPDATE item_revisions SET status='OBSOLETE' WHERE id=1" if change == "revision" else "UPDATE items SET is_active=false WHERE id=1"
+    restore = "UPDATE item_revisions SET status='ACTIVE' WHERE id=1" if change == "revision" else "UPDATE items SET is_active=true WHERE id=1"
+    try:
+        with sales_engine.begin() as connection:
+            connection.execute(text(statement))
+        response = client.post(f"/sales-orders/{order['id']}/confirm")
+        assert response.status_code == 422
+        assert response.json()["detail"]["code"] == code
+        assert client.get(f"/sales-orders/{order['id']}").json()["status"] == "DRAFT"
+    finally:
+        with sales_engine.begin() as connection:
+            connection.execute(text(restore))

@@ -204,7 +204,7 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture
 def feasibility_schema():
     name = "test_feas_" + uuid4().hex
     with connect() as connection:
@@ -244,7 +244,7 @@ def feasibility_schema():
             connection.execute(sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(name)))
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture
 def feasibility_engine(feasibility_schema):
     engine = create_engine("postgresql+psycopg://", creator=lambda: in_schema(feasibility_schema))
     yield engine
@@ -258,9 +258,14 @@ def client(feasibility_engine):
             yield session
 
     app.dependency_overrides[get_session] = test_session
-    with TestClient(app, headers={"X-Organization-ID": "1"}) as test_client:
-        yield test_client
-    app.dependency_overrides.pop(get_session, None)
+    try:
+        with TestClient(app, headers={"X-Organization-ID": "1"}) as test_client:
+            receive(test_client, 2, 1, "12000")
+            receive(test_client, 3, 1, "50")
+            receive(test_client, 3, 2, "100")
+            yield test_client
+    finally:
+        app.dependency_overrides.pop(get_session, None)
 
 
 def receive(client, revision_id, location_id, quantity):
@@ -289,12 +294,7 @@ def test_material_feasibility_endpoint_matches_user_prompt(client):
       ]
     }
     """
-    # 12000 cells in Warehouse
-    receive(client, revision_id=2, location_id=1, quantity="12000")
-    # 50 junction boxes in Warehouse
-    receive(client, revision_id=3, location_id=1, quantity="50")
-    # 100 junction boxes in Quarantine (should NOT be considered reservable/available)
-    receive(client, revision_id=3, location_id=2, quantity="100")
+    # Each test starts with 12000 cells, 50 eligible boxes and 100 quarantined boxes.
 
     resp = client.get("/production/boms/1/feasibility?quantity=70")
     assert resp.status_code == 200, resp.text
@@ -348,6 +348,7 @@ def test_feasibility_becomes_true_when_shortage_resolved(client):
 
 
 def test_feasibility_considers_active_reservations(client):
+    receive(client, 3, 1, "20")
     # Create an active reservation for 10 JB-1500
     # First create a sales order to own the reservation
     so_resp = client.post("/sales-orders", json={
@@ -411,6 +412,7 @@ def test_sales_order_material_feasibility_endpoint(client):
     4. Sales order material feasibility combines this with active BOM 1:
        Evaluates feasibility for the missing 70 panels!
     """
+    receive(client, 3, 1, "10")
     # Receive 30 finished panels (revision 1)
     receive(client, revision_id=1, location_id=1, quantity="30")
 
@@ -446,3 +448,100 @@ def test_sales_order_material_feasibility_endpoint(client):
     mats = {m["sku"]: m for m in line["materials"]}
     assert Decimal(str(mats["CELL-M10"]["shortage"])) == Decimal("0")
     assert Decimal(str(mats["JB-1500"]["shortage"])) == Decimal("10")
+
+
+def feasibility_order(client, lines):
+    response = client.post("/sales-orders", json={
+        "order_number": "SO-FEAS-" + uuid4().hex, "customer_id": 1,
+        "currency_code": "EUR", "lines": lines,
+    })
+    assert response.status_code == 201, response.text
+    return f"/sales-orders/{response.json()['id']}/material-feasibility"
+
+
+@pytest.mark.parametrize("different_product", [False, True])
+def test_order_lines_share_one_component_budget(client, feasibility_engine, different_product):
+    second_revision = 1
+    if different_product:
+        with feasibility_engine.begin() as connection:
+            connection.execute(text("""
+                INSERT INTO items(id,organization_id,sku,name,item_type,base_uom)
+                VALUES (4,1,'PV-OTHER','Other panel','FINISHED_GOOD','EA');
+                INSERT INTO item_revisions(id,organization_id,item_id,revision_code,status)
+                VALUES (4,1,4,'A','ACTIVE');
+                INSERT INTO boms(id,organization_id,product_revision_id,version,output_quantity)
+                VALUES (2,1,4,1,1);
+                INSERT INTO bom_lines(id,organization_id,bom_id,line_no,component_revision_id,quantity)
+                VALUES (3,1,2,1,3,1);
+                UPDATE boms SET status='ACTIVE' WHERE id=2;
+            """))
+        second_revision = 4
+    path = feasibility_order(client, [
+        {"item_revision_id": 1, "quantity": "40"},
+        {"item_revision_id": second_revision, "quantity": "40"},
+    ])
+    response = client.get(path)
+    assert response.status_code == 200, response.text
+    result = response.json()
+    assert result["can_produce"] is False
+    assert result["can_fulfill_all"] is False
+    assert [line["can_produce"] for line in result["lines"]] == [True, False]
+    boxes = [next(m for m in line["materials"] if m["sku"] == "JB-1500") for line in result["lines"]]
+    assert [Decimal(m["required"]) for m in boxes] == [40, 40]
+    assert [Decimal(m["available"]) for m in boxes] == [50, 10]
+    assert [Decimal(m["shortage"]) for m in boxes] == [0, 30]
+    assert client.get(path).json() == result
+    receive(client, 3, 1, "30")
+    assert client.get(path).json()["can_produce"] is True
+
+
+def test_material_budget_excludes_stock_planned_for_direct_shipment(client):
+    path = feasibility_order(client, [
+        {"item_revision_id": 1, "quantity": "20"},
+        {"item_revision_id": 3, "quantity": "40"},
+    ])
+    result = client.get(path).json()
+    boxes = next(m for m in result["lines"][0]["materials"] if m["sku"] == "JB-1500")
+    assert Decimal(boxes["available"]) == 10
+    assert Decimal(boxes["shortage"]) == 10
+    assert result["can_produce"] is False
+
+
+def test_feasibility_empty_missing_recipe_and_stock_only(client):
+    empty = client.get(feasibility_order(client, [])).json()
+    assert empty["lines"] == []
+    assert empty["can_produce"] is False
+    path = feasibility_order(client, [{"item_revision_id": 3, "quantity": "70"}])
+    missing = client.get(path).json()
+    assert missing["can_produce"] is False
+    assert missing["lines"][0]["bom_id"] is None
+    receive(client, 3, 1, "20")
+    stock_only = client.get(path).json()
+    assert stock_only["can_produce"] is True
+    assert stock_only["lines"][0]["materials"] == []
+
+
+@pytest.mark.parametrize("query", ["quantity=0", "quantity=-1", "quantity=NaN", "quantity=Infinity",
+                                      "quantity=0.0000001", "quantity=1000000000000",
+                                      "quantity=1&production_required=2"])
+def test_feasibility_rejects_invalid_or_conflicting_quantity(client, query):
+    assert client.get("/production/boms/1/feasibility?" + query).status_code == 422
+
+
+def test_both_feasibility_endpoints_are_read_only_and_tenant_scoped(client, feasibility_engine):
+    path = feasibility_order(client, [{"item_revision_id": 1, "quantity": "70"}])
+    previous = app.dependency_overrides[get_session]
+    def read_only_session():
+        with Session(feasibility_engine) as session, session.begin():
+            session.execute(text("SET TRANSACTION READ ONLY"))
+            yield session
+    app.dependency_overrides[get_session] = read_only_session
+    try:
+        for endpoint in [path, "/production/boms/1/feasibility?quantity=70"]:
+            response = client.get(endpoint)
+            assert response.status_code == 200, response.text
+            assert client.get(endpoint, headers={"X-Organization-ID": "2"}).status_code == 404
+        assert client.get("/production/boms/999999/feasibility?quantity=70").status_code == 404
+        assert client.get("/sales-orders/999999/material-feasibility").status_code == 404
+    finally:
+        app.dependency_overrides[get_session] = previous

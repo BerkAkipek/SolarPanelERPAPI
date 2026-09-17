@@ -90,6 +90,95 @@ def assert_error(response, status, code):
     assert response.json()["detail"]["code"] == code
 
 
+def test_availability_subtracts_only_active_reservations(api, api_connection):
+    api_connection.execute(text("""
+        INSERT INTO business_partners(id,organization_id,code,name)
+        VALUES (1,1,'CUSTOMER','Customer');
+        INSERT INTO sales_orders(id,organization_id,order_number,customer_id,currency_code)
+        VALUES (1,1,'SO-AVAILABILITY',1,'EUR');
+        INSERT INTO sales_order_lines(id,organization_id,sales_order_id,line_no,item_revision_id,quantity)
+        VALUES (1,1,1,1,1,1000);
+    """))
+    receipt(api, "100.125")
+    receipt(api, "20.25", destination=2)
+    receipt(api, "50", destination=4)  # Quarantine is physical stock only.
+    for quantity, transition in [("70.025", None), ("10", "release"), ("5", "consume")]:
+        response = api.post("/inventory/reservations", json={
+            "item_revision_id": 1, "location_id": 1,
+            "quantity": quantity, "sales_order_line_id": 1,
+        })
+        assert response.status_code == 201, response.text
+        reservation_id = response.json()["id"]
+        if transition == "release":
+            assert api.delete(f"/inventory/reservations/{reservation_id}").status_code == 200
+        elif transition == "consume":
+            assert api.post(f"/inventory/reservations/{reservation_id}/consume").status_code == 200
+
+    response = api.get("/inventory/items/1/availability")
+    assert response.status_code == 200, response.text
+    result = response.json()
+    assert result["item_revision_id"] == 1
+    assert result["organization_id"] == 1
+    assert result["sku"] == "CELL"
+    for field, expected in [("on_hand", "115.375"), ("reserved", "70.025"), ("available", "45.35")]:
+        assert isinstance(result[field], str)
+        assert Decimal(result[field]) == Decimal(expected)
+        assert sum(Decimal(row[field]) for row in result["locations"]) == Decimal(expected)
+    assert [row["location_id"] for row in result["locations"]] == [1, 2]
+    for row in result["locations"]:
+        assert Decimal(row["available"]) == Decimal(row["on_hand"]) - Decimal(row["reserved"])
+    assert Decimal(balance(api)["on_hand_quantity"]) == Decimal("165.375")
+    assert api.get("/inventory/items/1/availability").json() == result
+    assert api_connection.scalar(text("SELECT count(*) FROM inventory_movements")) == 4
+    assert api_connection.scalar(text("SELECT count(*) FROM stock_reservations")) == 3
+
+
+@pytest.mark.parametrize("location_type,is_active,eligible", [
+    ("WAREHOUSE", True, True), ("BIN", True, True), ("PRODUCTION", True, True),
+    ("QUARANTINE", True, False), ("DAMAGED", True, False), ("TRANSIT", True, False),
+    ("WAREHOUSE", False, False), ("BIN", False, False), ("PRODUCTION", False, False),
+])
+def test_availability_location_eligibility(api, api_connection, location_type, is_active, eligible):
+    api_connection.execute(text("""
+        UPDATE inventory_locations SET location_type = :kind, is_active = :active WHERE id = 4
+    """), {"kind": location_type, "active": is_active})
+    receipt(api, "10.125", destination=4)
+    response = api.get("/inventory/items/1/availability")
+    assert response.status_code == 200, response.text
+    result = response.json()
+    expected = Decimal("10.125") if eligible else Decimal(0)
+    assert Decimal(result["on_hand"]) == expected
+    assert Decimal(result["reserved"]) == 0
+    assert Decimal(result["available"]) == expected
+    assert [row["location_id"] for row in result["locations"]] == ([4] if eligible else [])
+    assert Decimal(balance(api)["on_hand_quantity"]) == Decimal("10.125")
+
+
+def test_availability_empty_revision_does_not_include_other_revision_stock(api):
+    receipt(api, "100", revision=1)
+    response = api.get("/inventory/items/2/availability")
+    assert response.status_code == 200, response.text
+    result = response.json()
+    assert result["revision_code"] == "REV-B"
+    assert all(Decimal(result[field]) == 0 for field in ("on_hand", "reserved", "available"))
+    assert result["locations"] == []
+
+
+@pytest.mark.parametrize("revision", [3, 999999])
+def test_availability_unknown_or_other_organization_revision(api, revision):
+    assert_error(api.get(f"/inventory/items/{revision}/availability"), 404, "revision_not_found")
+
+
+def test_availability_requires_organization(api):
+    api.headers.pop("X-Organization-ID")
+    assert api.get("/inventory/items/1/availability").status_code == 422
+
+
+@pytest.mark.parametrize("revision", [0, -1, "invalid", 9223372036854775808])
+def test_availability_rejects_invalid_revision_id(api, revision):
+    assert api.get(f"/inventory/items/{revision}/availability").status_code == 422
+
+
 def test_receipt_increases_stock(api, api_connection):
     result = receipt(api).json()
     assert len(result["lines"]) == 1

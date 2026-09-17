@@ -21,7 +21,7 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture
 def reservation_schema():
     name = "test_res_" + uuid4().hex
     with connect() as connection:
@@ -56,7 +56,7 @@ def reservation_schema():
             connection.execute(sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(name)))
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture
 def reservation_engine(reservation_schema):
     engine = create_engine("postgresql+psycopg://", creator=lambda: in_schema(reservation_schema))
     yield engine
@@ -64,15 +64,26 @@ def reservation_engine(reservation_schema):
 
 
 @pytest.fixture
-def client(reservation_engine):
+def reservation_connection(reservation_engine):
+    with reservation_engine.connect() as connection, connection.begin():
+        yield connection
+        connection.rollback()
+
+
+@pytest.fixture
+def client(reservation_connection):
     def test_session():
-        with Session(reservation_engine, expire_on_commit=False) as session, session.begin():
+        with Session(bind=reservation_connection, join_transaction_mode="create_savepoint",
+                     expire_on_commit=False) as session, session.begin():
             yield session
 
     app.dependency_overrides[get_session] = test_session
-    with TestClient(app, headers={"X-Organization-ID": "1"}) as test_client:
-        yield test_client
-    app.dependency_overrides.pop(get_session, None)
+    try:
+        with TestClient(app, headers={"X-Organization-ID": "1"}) as test_client:
+            receive_stock(test_client, "100")
+            yield test_client
+    finally:
+        app.dependency_overrides.pop(get_session, None)
 
 
 def receive_stock(client, quantity="100", revision=1, location=1):
@@ -104,8 +115,7 @@ def create_res(client, quantity="70", revision=1, location=1, sales_order_line_i
 
 
 def test_reserve_valid_quantity(client):
-    # Receive 100 units
-    receive_stock(client, "100")
+    # Each test starts with 100 units.
     avail_before = get_availability(client)
     assert Decimal(avail_before["on_hand"]) == Decimal("100")
     assert Decimal(avail_before["reserved"]) == Decimal("0")
@@ -130,7 +140,7 @@ def test_reserve_valid_quantity(client):
 
 
 def test_reject_reservation_greater_than_available(client):
-    # Available is 100 (from previous test's receipt + release)
+    # Available is 100 from this test's fixture.
     avail = get_availability(client)
     current_avail = Decimal(avail["available"])
 
@@ -175,15 +185,10 @@ def test_consumed_reservation_does_not_become_available(client):
     assert consume_response.status_code == 200, consume_response.text
     assert consume_response.json()["status"] == "CONSUMED"
 
-    # Physical stock consumption movement (e.g. shipment/issue)
-    client.post("/inventory/movements", json={
-        "movement_type": "ADJUSTMENT_OUT",
-        "lines": [{
-            "item_revision_id": 1,
-            "from_location_id": 1,
-            "quantity": "50",
-        }],
-    })
+    # Consumption posts the physical issue atomically; retries cannot issue twice.
+    retry = client.post(f"/inventory/reservations/{res_id}/consume")
+    assert retry.status_code == 200
+    assert retry.json() == consume_response.json()
 
     # Available stock does not regain the 50 units
     avail = get_availability(client)
@@ -232,6 +237,7 @@ def test_two_concurrent_reservations_cannot_oversell_stock(reservation_engine):
     app.dependency_overrides[get_session] = committed_session
     try:
         with TestClient(app, headers={"X-Organization-ID": "1"}) as test_client:
+            receive_stock(test_client, "100")
             # Current available stock is 100
             avail = get_availability(test_client)
             assert Decimal(avail["available"]) == Decimal("100")
@@ -274,6 +280,13 @@ def test_two_concurrent_reservations_cannot_oversell_stock(reservation_engine):
             assert Decimal(avail_final["on_hand"]) == Decimal("100")
             assert Decimal(avail_final["reserved"]) == Decimal("60")
             assert Decimal(avail_final["available"]) == Decimal("40")
+            winner = resp1 if resp1.status_code == 201 else resp2
+            assert test_client.post(f"/inventory/reservations/{winner.json()['id']}/consume").status_code == 200
+            response = test_client.post("/inventory/movements", json={
+                "movement_type": "ADJUSTMENT_OUT",
+                "lines": [{"item_revision_id": 1, "from_location_id": 1, "quantity": "40"}],
+            })
+            assert response.status_code == 201
     finally:
         app.dependency_overrides.pop(get_session, None)
 
@@ -335,3 +348,113 @@ def test_mismatched_revision_for_sales_order_line(client):
     })
     assert resp.status_code == 422
     assert resp.json()["detail"]["code"] == "sales_order_line_not_found"
+
+
+def test_explicit_release_preserves_history_and_rejects_consumption(client):
+    created = create_res(client, "100").json()
+    path = f"/inventory/reservations/{created['id']}"
+    assert Decimal(get_availability(client)["available"]) == 0
+    released = client.post(path + "/release")
+    assert released.status_code == 200
+    assert released.json()["status"] == "RELEASED"
+    assert client.post(path + "/release").json() == released.json()
+    assert client.delete(path).json() == released.json()
+    assert client.get(path).json() == released.json()
+    assert released.json()["created_at"] == created["created_at"]
+    response = client.post(path + "/consume")
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "reservation_terminal"
+    assert Decimal(get_availability(client)["available"]) == 100
+
+
+@pytest.mark.parametrize("operation", ["read", "release", "consume", "delete"])
+def test_reservation_scope_and_missing_records(client, operation):
+    reservation = create_res(client, "10").json()
+    for reservation_id, headers in [(reservation["id"], {"X-Organization-ID": "2"}), (999999, {})]:
+        path = f"/inventory/reservations/{reservation_id}"
+        if operation == "read":
+            response = client.get(path, headers=headers)
+        elif operation == "delete":
+            response = client.delete(path, headers=headers)
+        else:
+            response = client.post(path + "/" + operation, headers=headers)
+        assert response.status_code == 404
+        assert response.json()["detail"]["code"] == "reservation_not_found"
+    assert client.get(f"/inventory/reservations/{reservation['id']}").json()["status"] == "ACTIVE"
+
+
+def test_consumption_rolls_back_if_stock_posting_fails(client, reservation_connection):
+    reservation = create_res(client, "40").json()
+    reservation = client.get(f"/inventory/reservations/{reservation['id']}").json()
+    before = get_availability(client)
+    # Inject a database failure after the allocation changes but before the issue commits.
+    reservation_connection.execute(text("""
+        CREATE FUNCTION fail_reservation_issue() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN
+            RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'Injected issue failure';
+        END $$;
+        CREATE TRIGGER fail_reservation_issue BEFORE INSERT ON inventory_movement_lines
+        FOR EACH ROW EXECUTE FUNCTION fail_reservation_issue();
+    """))
+    path = f"/inventory/reservations/{reservation['id']}"
+    response = client.post(path + "/consume")
+    assert response.status_code == 422
+    assert client.get(path).json() == reservation
+    assert get_availability(client) == before
+    assert reservation_connection.scalar(text("SELECT count(*) FROM inventory_movements")) == 1
+    reservation_connection.execute(text("DROP TRIGGER fail_reservation_issue ON inventory_movement_lines"))
+    assert client.post(path + "/consume").status_code == 200
+    assert Decimal(get_availability(client)["on_hand"]) == 60
+
+
+def test_consumption_cannot_reallocate_issued_stock(client, reservation_connection):
+    reservation = create_res(client, "100").json()
+    path = f"/inventory/reservations/{reservation['id']}/consume"
+    assert client.post(path).status_code == 200
+    assert client.post(path).status_code == 200
+    response = create_res(client, "0.000001")
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "insufficient_stock"
+    assert Decimal(get_availability(client)["available"]) == 0
+    issues = reservation_connection.execute(text("""
+        SELECT m.movement_type, m.reference, l.quantity FROM inventory_movements m
+        JOIN inventory_movement_lines l ON l.movement_id = m.id
+        WHERE m.movement_type = 'SHIPMENT'
+    """)).all()
+    assert issues == [("SHIPMENT", f"RESERVATION-{reservation['id']}", Decimal("100"))]
+
+
+def test_material_reservation_consumes_component_stock(client, reservation_connection):
+    reservation_connection.execute(text("""
+        INSERT INTO boms(id,organization_id,product_revision_id,version,output_quantity)
+        VALUES (1,1,1,1,1);
+        INSERT INTO bom_lines(id,organization_id,bom_id,line_no,component_revision_id,quantity)
+        VALUES (1,1,1,1,2,10);
+        UPDATE boms SET status='ACTIVE' WHERE id=1;
+        INSERT INTO production_orders(id,organization_id,production_order_number,product_revision_id,bom_id,quantity)
+        VALUES (1,1,'PO-TEST',1,1,1);
+        INSERT INTO production_order_materials(organization_id,production_order_id,bom_id,bom_line_id,component_revision_id,required_quantity)
+        VALUES (1,1,1,1,2,10);
+    """))
+    material_id = reservation_connection.scalar(text("SELECT id FROM production_order_materials"))
+    receive_stock(client, "10", revision=2)
+    response = client.post("/inventory/reservations", json={
+        "item_revision_id": 2, "location_id": 1, "quantity": "10",
+        "production_order_material_id": material_id,
+    })
+    assert response.status_code == 201, response.text
+    reservation_id = response.json()["id"]
+    assert client.post(f"/inventory/reservations/{reservation_id}/consume").status_code == 200
+    assert Decimal(get_availability(client, revision=2)["on_hand"]) == 0
+    assert reservation_connection.scalar(text("""
+        SELECT movement_type FROM inventory_movements WHERE reference = :reference
+    """), {"reference": f"RESERVATION-{reservation_id}"}) == "PRODUCTION_CONSUMPTION"
+
+
+def test_reservations_cannot_exceed_owner_demand(client, reservation_connection):
+    reservation_connection.execute(text("UPDATE sales_order_lines SET quantity=10 WHERE id=1"))
+    assert create_res(client, "10").status_code == 201
+    response = create_res(client, "0.000001")
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "reservation_exceeds_demand"
+    assert Decimal(get_availability(client)["reserved"]) == 10
